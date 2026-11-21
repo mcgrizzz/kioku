@@ -4,6 +4,16 @@
 
 <h1 align="center">Kioku</h1>
 
+> [!IMPORTANT]
+> **This fork: Kioku RWKV.** The iOS app built from
+> [JSchoreels/anki](https://github.com/JSchoreels/anki) (FSRS-7, RWKV) on the
+> [`rwkv`](https://github.com/mcgrizzz/kioku/tree/rwkv) branch.
+>
+> **📲 [Install on iPhone (LiveContainer)](https://mcgrizzz.github.io/kioku/)** ·
+> [Download .ipa](https://github.com/mcgrizzz/kioku/releases/download/rwkv-latest/Kioku-RWKV.ipa) ·
+> [Latest build](https://github.com/mcgrizzz/kioku/releases/tag/rwkv-latest) ·
+> [Build runs](https://github.com/mcgrizzz/kioku/actions/workflows/ios-testflight.yml)
+
 <p align="center">
   <b>The real Anki desktop app on your phone, in your browser and on your own server.</b><br>
   Add-ons, the card browser and every desktop feature, made for a touch screen.
