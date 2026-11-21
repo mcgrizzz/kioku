@@ -10,7 +10,8 @@
 # signing, authenticated with an App Store Connect API key (no Xcode sign-in):
 #   APP_STORE_KEY_ID, APP_STORE_ISSUER_ID   from the environment or ../.env
 #   APP_STORE_KEY_PATH                      default ../AuthKey_<key id>.p8
-# The app (bundle id io.ankidesk.kioku) must exist in App Store Connect.
+# The app (bundle id KIOKU_BUNDLE_ID, default io.ankidesk.kioku) must exist in
+# App Store Connect.
 # Env: KIOKU_VERSION (default: the latest v* tag), KIOKU_BUILD (default: the
 # number of commits; must grow with every upload of the same version)
 set -euo pipefail
@@ -56,7 +57,8 @@ if [ "${1:-}" != --upload-only ]; then
     "$ROOT/../shared/tools/cmake_fresh.sh" "$ROOT/build/xcode-dist" "$QT/ios"
     "$QT/ios/bin/qt-cmake" -S "$ROOT" -B "$ROOT/build/xcode-dist" -G Xcode \
         -DQT_HOST_PATH="$QT/macos" -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_OSX_ARCHITECTURES=arm64 \
-        -DKIOKU_TEAM="$TEAM" -DKIOKU_VERSION="$VERSION" -DKIOKU_BUILD="$BUILD_NUMBER" > /dev/null
+        -DKIOKU_TEAM="$TEAM" -DKIOKU_VERSION="$VERSION" -DKIOKU_BUILD="$BUILD_NUMBER" \
+        -DKIOKU_BUNDLE_ID="${KIOKU_BUNDLE_ID:-io.ankidesk.kioku}" > /dev/null
 
     rm -rf "$OUT" && mkdir -p "$OUT"
     echo "Archiving Kioku $VERSION ($BUILD_NUMBER)"

@@ -35,7 +35,8 @@ rsync -a "$ROOT/../build/wheels/ios/site/" "$ROOT/build/site/"
 "$ROOT/../shared/tools/cmake_fresh.sh" "$ROOT/build/xcode-dev" "$QT/ios"
 "$QT/ios/bin/qt-cmake" -S "$ROOT" -B "$ROOT/build/xcode-dev" -G Xcode \
     -DQT_HOST_PATH="$QT/macos" -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_OSX_ARCHITECTURES=arm64 \
-    -DKIOKU_TEAM="$TEAM" -DKIOKU_VERSION="$VERSION" -DKIOKU_BUILD="$BUILD_NUMBER" > /dev/null
+    -DKIOKU_TEAM="$TEAM" -DKIOKU_VERSION="$VERSION" -DKIOKU_BUILD="$BUILD_NUMBER" \
+        -DKIOKU_BUNDLE_ID="${KIOKU_BUNDLE_ID:-io.ankidesk.kioku}" > /dev/null
 
 cd "$ROOT/build/xcode-dev"
 if [ -n "$TEAM" ]; then

@@ -18,3 +18,6 @@ xxsubtype*.so
 # static libraries for building C extensions (numpy's libnpymath.a); the App
 # Store rejects any library outside a framework
 *.a
+# Anki fork (ANKI_REF): the RWKV model's PyTorch checkpoint, read only by its
+# offline benchmarks (the scheduler loads the .bin weights next to it)
+/aqt/rwkv_inference/*.pth

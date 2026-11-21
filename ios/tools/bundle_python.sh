@@ -49,7 +49,7 @@ install_so() {
     cp "$XCFRAMEWORK/build/iOS-dylib-Info-template.plist" "$APP/$fw/Info.plist"
     plutil -replace CFBundleExecutable -string "$modname" "$APP/$fw/Info.plist"
     plutil -replace CFBundleIdentifier -string \
-        "io.ankidesk.kioku.$(echo "$modname" | tr _ -)" "$APP/$fw/Info.plist"
+        "${PRODUCT_BUNDLE_IDENTIFIER:-io.ankidesk.kioku}.$(echo "$modname" | tr _ -)" "$APP/$fw/Info.plist"
     mv "$full" "$APP/$fw/$modname"
     # local symbols only (exported ones, PyInit_*, stay)
     strip -x "$APP/$fw/$modname" 2>/dev/null || true

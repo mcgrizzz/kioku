@@ -16,6 +16,8 @@ endforeach()
 
 set(KIOKU_VERSION "${ANKI_PY_VERSION}" CACHE STRING "App version shown in Settings")
 set(KIOKU_BUILD "1" CACHE STRING "Build number (CFBundleVersion)")
+# your own for TestFlight: a bundle id is registered to one Apple team
+set(KIOKU_BUNDLE_ID "io.ankidesk.kioku" CACHE STRING "Bundle identifier")
 
 set(DEPS ${CMAKE_SOURCE_DIR}/deps)
 set(PYTHON_XCFRAMEWORK ${DEPS}/python-ios/Python.xcframework)
@@ -79,11 +81,11 @@ target_link_libraries(Kioku PRIVATE
 set_target_properties(Kioku PROPERTIES
     OUTPUT_NAME Kioku
     MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/src/Info.plist.in
-    MACOSX_BUNDLE_GUI_IDENTIFIER io.ankidesk.kioku
+    MACOSX_BUNDLE_GUI_IDENTIFIER ${KIOKU_BUNDLE_ID}
     MACOSX_BUNDLE_BUNDLE_NAME Kioku
     MACOSX_BUNDLE_BUNDLE_VERSION ${KIOKU_BUILD}
     MACOSX_BUNDLE_SHORT_VERSION_STRING ${KIOKU_VERSION}
-    XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER io.ankidesk.kioku
+    XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER ${KIOKU_BUNDLE_ID}
     XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET 17.0
     XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
     XCODE_ATTRIBUTE_ENABLE_BITCODE NO

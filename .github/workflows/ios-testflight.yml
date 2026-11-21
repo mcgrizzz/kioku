@@ -1,0 +1,219 @@
+# Builds the iOS app from the Anki fork in shared/versions.env (ANKI_REPO,
+# ANKI_REF) and uploads it to TestFlight, or keeps an unsigned .ipa for
+# sideloading. No Mac needed: run it from Actions → "iOS TestFlight (fork)".
+#
+# 1. Linux: aqt's and anki's wheels from the fork (Anki's own build), since
+#    they are not on PyPI. Cheaper and roomier than the macOS runner.
+# 2. macOS: everything else (Qt, Python, rsbridge from the same commit, ...),
+#    then tools/testflight.sh or tools/build.sh.
+#
+# For the upload, set in Settings → Secrets and variables → Actions:
+#   secrets   APP_STORE_KEY_ID, APP_STORE_ISSUER_ID   App Store Connect API key
+#             APP_STORE_KEY_P8                        contents of AuthKey_<id>.p8
+#             KIOKU_TEAM                              your Apple team id
+#   optional  DIST_CERT_P12, DIST_CERT_PASSWORD       Apple Distribution
+#             certificate (base64 of the .p12); without it the key needs the
+#             Admin role so that Xcode can sign in the cloud
+#   variable  KIOKU_BUNDLE_ID                         e.g. com.yourname.kioku
+#
+# A push to the rwkv branch builds the unsigned .ipa (no secrets needed).
+name: iOS TestFlight (fork)
+
+on:
+  push:
+    branches: [rwkv]
+    paths: ["ios/**", "shared/**", ".github/workflows/ios-testflight.yml"]
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: "Upload to TestFlight (off: unsigned .ipa artifact only)"
+        type: boolean
+        default: true
+      version:
+        description: "App version (CFBundleShortVersionString; empty: ANKI_PY_VERSION)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
+jobs:
+  wheels:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Versions
+        run: |
+          source shared/versions.env
+          echo "ANKI_REF=$ANKI_REF" >> "$GITHUB_ENV"
+          [ -n "$ANKI_REF" ] || { echo "ANKI_REF is empty in shared/versions.env" >&2; exit 1; }
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends rsync unzip zstd pkg-config libssl-dev
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "UV_BINARY=$(command -v uv)" >> "$GITHUB_ENV"
+
+      - name: Cache Anki's build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ios/deps/anki/out
+          key: anki-wheels-${{ env.ANKI_REF }}-${{ github.run_id }}
+          restore-keys: anki-wheels-
+
+      - name: Anki source
+        run: shared/tools/anki_source.sh ios/deps/anki
+
+      - name: n2
+        run: command -v n2 || ios/deps/anki/tools/install-n2
+
+      - name: Wheels
+        run: |
+          dir=$(shared/tools/build_anki_wheels.sh ios/deps/anki)
+          mkdir -p dist && cp "$dir"/*.whl dist/
+          ls -l dist
+          # out/rust is large and only the wheels' native module, thrown away
+          rm -rf ios/deps/anki/out/rust/debug/incremental
+
+      - name: Build log
+        if: failure()
+        run: tail -200 ios/deps/anki/out/kioku-wheels.log || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: anki-wheels
+          path: dist/*.whl
+          compression-level: 0
+
+  ios:
+    needs: wheels
+    runs-on: macos-latest
+    timeout-minutes: 240
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Tools
+        run: |
+          brew install protobuf swig ninja pkgconf
+          rustup --version
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: anki-wheels
+          path: ${{ runner.temp }}/anki-wheels
+
+      - name: Cache Qt and Python
+        uses: actions/cache@v4
+        with:
+          path: |
+            ios/deps/qt
+            ios/deps/python-ios
+          key: ios-deps-${{ hashFiles('shared/versions.env') }}
+
+      - name: Cache add-on programs and packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/programs/src
+            build/programs/data
+            build/programs/ios
+            build/wheels/ios
+          key: ios-programs-${{ hashFiles('shared/versions.env', 'shared/programs/*', 'shared/tools/build_programs.sh', 'shared/tools/build_wheels.sh') }}
+
+      - name: Cache Rust builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ios/deps/anki/target
+          key: ios-rust-${{ hashFiles('shared/versions.env') }}-${{ github.run_id }}
+          restore-keys: ios-rust-
+
+      - name: Version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          source ../shared/versions.env
+          echo "KIOKU_VERSION=${INPUT_VERSION:-$ANKI_PY_VERSION}" >> "$GITHUB_ENV"
+          # CFBundleVersion: must grow with every upload of a version
+          echo "KIOKU_BUILD=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          echo "ANKI_WHEELS=$RUNNER_TEMP/anki-wheels" >> "$GITHUB_ENV"
+
+      - name: Signing
+        if: inputs.upload
+        env:
+          APP_STORE_KEY_ID: ${{ secrets.APP_STORE_KEY_ID }}
+          APP_STORE_KEY_P8: ${{ secrets.APP_STORE_KEY_P8 }}
+          DIST_CERT_P12: ${{ secrets.DIST_CERT_P12 }}
+          DIST_CERT_PASSWORD: ${{ secrets.DIST_CERT_PASSWORD }}
+        run: |
+          [ -n "$APP_STORE_KEY_ID" ] && [ -n "$APP_STORE_KEY_P8" ] \
+              || { echo "APP_STORE_KEY_ID / APP_STORE_KEY_P8 secrets are not set" >&2; exit 1; }
+          key=$RUNNER_TEMP/AuthKey_$APP_STORE_KEY_ID.p8
+          printf '%s\n' "$APP_STORE_KEY_P8" > "$key"
+          echo "APP_STORE_KEY_PATH=$key" >> "$GITHUB_ENV"
+          if [ -n "$DIST_CERT_P12" ]; then
+              kc=$RUNNER_TEMP/signing.keychain-db
+              kcpass=$(uuidgen)
+              security create-keychain -p "$kcpass" "$kc"
+              security set-keychain-settings -lut 21600 "$kc"
+              security unlock-keychain -p "$kcpass" "$kc"
+              echo "$DIST_CERT_P12" | base64 --decode > "$RUNNER_TEMP/dist.p12"
+              security import "$RUNNER_TEMP/dist.p12" -P "$DIST_CERT_PASSWORD" \
+                  -A -t cert -f pkcs12 -k "$kc"
+              rm "$RUNNER_TEMP/dist.p12"
+              security set-key-partition-list -S apple-tool:,apple: -k "$kcpass" "$kc" > /dev/null
+              security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          fi
+
+      - name: Build and upload to TestFlight
+        if: inputs.upload
+        env:
+          KIOKU_TEAM: ${{ secrets.KIOKU_TEAM }}
+          KIOKU_BUNDLE_ID: ${{ vars.KIOKU_BUNDLE_ID }}
+          APP_STORE_KEY_ID: ${{ secrets.APP_STORE_KEY_ID }}
+          APP_STORE_ISSUER_ID: ${{ secrets.APP_STORE_ISSUER_ID }}
+        run: |
+          [ -n "$KIOKU_TEAM" ] || { echo "KIOKU_TEAM secret is not set" >&2; exit 1; }
+          [ -n "$KIOKU_BUNDLE_ID" ] || { echo "KIOKU_BUNDLE_ID variable is not set" >&2; exit 1; }
+          tools/testflight.sh
+
+      - name: Build unsigned .ipa
+        if: ${{ !inputs.upload }}
+        env:
+          KIOKU_BUNDLE_ID: ${{ vars.KIOKU_BUNDLE_ID }}
+        run: |
+          tools/build.sh
+          mkdir -p dist && cp "build/Kioku-$KIOKU_VERSION-unsigned.ipa" dist/
+
+      - name: Build logs
+        if: failure()
+        run: |
+          for log in build/xcode-archive.log build/xcode-upload.log build/xcode-dev.log \
+                     build/pymupdf.log build/programs.log build/wheels.log; do
+              [ -f "$log" ] && { echo "== $log"; tail -100 "$log"; }
+          done
+          true
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.upload }}
+        with:
+          name: Kioku-iOS-${{ env.KIOKU_VERSION }}-${{ github.run_number }}-unsigned
+          path: ios/dist/
+          compression-level: 0
