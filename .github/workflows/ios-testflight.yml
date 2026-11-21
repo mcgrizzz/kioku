@@ -35,7 +35,8 @@ on:
         default: ""
 
 permissions:
-  contents: read
+  # unsigned builds go to the rwkv-latest prerelease (install page: gh-pages)
+  contents: write
 
 concurrency:
   group: ios-testflight
@@ -217,3 +218,25 @@ jobs:
           name: Kioku-iOS-${{ env.KIOKU_VERSION }}-${{ github.run_number }}-unsigned
           path: ios/dist/
           compression-level: 0
+
+      # a fixed public URL for the .ipa, which the install page on gh-pages
+      # hands to LiveContainer (livecontainer://install?url=...)
+      - name: Publish to the rwkv-latest prerelease
+        if: ${{ !inputs.upload }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source ../shared/versions.env
+          cp "dist/Kioku-$KIOKU_VERSION-unsigned.ipa" dist/Kioku-RWKV.ipa
+          owner=${GITHUB_REPOSITORY%/*}
+          notes="Unsigned build $GITHUB_RUN_NUMBER of ${GITHUB_SHA::7} (Anki ${ANKI_REF::8} from $ANKI_REPO).
+          Install on your phone: https://$owner.github.io/${GITHUB_REPOSITORY#*/}/"
+          if gh release view rwkv-latest -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/rwkv-latest" \
+                  -f sha="$GITHUB_SHA" -F force=true > /dev/null
+              gh release edit rwkv-latest -R "$GITHUB_REPOSITORY" --notes "$notes"
+          else
+              gh release create rwkv-latest -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+                  --prerelease --title "Kioku RWKV (sideload)" --notes "$notes"
+          fi
+          gh release upload rwkv-latest -R "$GITHUB_REPOSITORY" dist/Kioku-RWKV.ipa --clobber
