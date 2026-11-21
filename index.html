@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Install Kioku RWKV</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --fg: #1d1c1a; --muted: #6b6862; --card: #ffffff;
+    --line: #e3e0da; --accent: #2557d6; --accent-fg: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413; --fg: #edebe6; --muted: #9a968e; --card: #1e1d1b;
+      --line: #2e2c29; --accent: #5b8cff; --accent-fg: #0b0b0a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 17px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
+  }
+  main { max-width: 440px; margin: 0 auto; }
+  h1 { font-size: 28px; letter-spacing: -0.02em; margin: 8px 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .btn {
+    display: block; width: 100%; text-align: center; text-decoration: none;
+    padding: 16px; border-radius: 14px; font-weight: 600; font-size: 18px;
+    margin-bottom: 12px;
+  }
+  .primary { background: var(--accent); color: var(--accent-fg); }
+  .secondary { background: var(--card); color: var(--fg); border: 1px solid var(--line); }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 14px 16px; margin-top: 20px; font-size: 15px;
+  }
+  .card dt { color: var(--muted); font-size: 13px; }
+  .card dd { margin: 0 0 8px; overflow-wrap: anywhere; }
+  .card dd:last-child { margin-bottom: 0; }
+  .note { color: var(--muted); font-size: 14px; margin-top: 20px; }
+  a { color: var(--accent); }
+  code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Kioku RWKV</h1>
+  <p class="sub">Anki desktop for iPhone, built from the JSchoreels/anki fork (FSRS-7, RWKV).</p>
+
+  <a id="lc" class="btn primary" href="#">Install in LiveContainer</a>
+  <a id="ipa" class="btn secondary" href="#">Download .ipa</a>
+
+  <dl class="card" id="info">
+    <dt>Latest build</dt><dd id="build">Checking…</dd>
+  </dl>
+
+  <p class="note">
+    Tapping Install opens LiveContainer, which downloads and installs the app.
+    It needs <a href="https://github.com/LiveContainer/LiveContainer">LiveContainer</a>
+    installed first. To sideload from a computer instead, use Download with Sideloadly.
+  </p>
+</main>
+<script>
+  // owner.github.io/repo/ → owner/repo
+  const owner = location.hostname.endsWith(".github.io")
+    ? location.hostname.split(".")[0] : "mcgrizzz";
+  const repo = location.pathname.split("/").filter(Boolean)[0] || "kioku";
+  const tag = "rwkv-latest";
+  const ipa = `https://github.com/${owner}/${repo}/releases/download/${tag}/Kioku-RWKV.ipa`;
+
+  document.getElementById("ipa").href = ipa;
+  document.getElementById("lc").href = "livecontainer://install?url=" + encodeURIComponent(ipa);
+
+  const build = document.getElementById("build");
+  fetch(`https://api.github.com/repos/${owner}/${repo}/releases/tags/${tag}`)
+    .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    .then(rel => {
+      const asset = (rel.assets || []).find(a => a.name === "Kioku-RWKV.ipa");
+      if (!asset) { build.textContent = "No build published yet."; return; }
+      const when = new Date(asset.updated_at).toLocaleString();
+      const mb = (asset.size / 1e6).toFixed(0);
+      build.textContent = `${when} · ${mb} MB`;
+      const notes = (rel.body || "").split("\n")[0];
+      if (notes) {
+        const dt = document.createElement("dt"); dt.textContent = "From";
+        const dd = document.createElement("dd"); dd.textContent = notes;
+        document.getElementById("info").append(dt, dd);
+      }
+    })
+    .catch(() => { build.textContent = "No build published yet."; });
+</script>
+</body>
+</html>
