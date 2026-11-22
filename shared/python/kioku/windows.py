@@ -15,17 +15,21 @@ import sys
 from typing import Any
 
 from PyQt6 import sip
-from PyQt6.QtCore import QEvent, QMargins, QObject, QRect, QRectF, QSignalBlocker, QSize, Qt, QTimer
+from PyQt6.QtCore import QEvent, QMargins, QObject, QPoint, QRect, QRectF, QSignalBlocker, QSize, Qt, QTimer
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
     QApplication,
+    QAbstractButton,
     QAbstractScrollArea,
     QBoxLayout,
     QAbstractSpinBox,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFrame,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLayout,
     QLabel,
@@ -33,9 +37,9 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QScroller,
-    QScrollerProperties,
     QSizePolicy,
     QTabBar,
     QTabWidget,
@@ -47,6 +51,8 @@ BAR_PROPERTY = "kiokuTitleBar"
 BORDER_PROPERTY = "kiokuPopupBorder"
 # gap between a card-style window and the screen edges
 CARD_MARGIN = 8
+# how far a finger may move during a tap (the tab strip)
+TAP_SLOP = 10
 WINDOW_TYPES = (Qt.WindowType.Window, Qt.WindowType.Dialog, Qt.WindowType.Sheet)
 
 
@@ -176,6 +182,10 @@ def _fit_children(w: QWidget, avail: QRect) -> None:
                 QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
             )
             child.setMinimumContentsLength(8)
+            # QComboBox keeps its minimum size from before (Preferences'
+            # Default deck: 350 px, the length of its longest entry)
+            if child.minimumWidth() == 0:
+                child.setMinimumWidth(min(child.sizeHint().width(), narrow - 4 * CARD_MARGIN))
         elif (
             isinstance(child, QDialogButtonBox)
             and child.orientation() == Qt.Orientation.Horizontal
@@ -195,10 +205,263 @@ def _fit_children(w: QWidget, avail: QRect) -> None:
             and child.sizeHint().width() > narrow * 0.6
         ):
             child.setWordWrap(True)
+        elif (
+            isinstance(child, (QCheckBox, QRadioButton))
+            and child.text()
+            and child.sizeHint().width() > _room(child, w, narrow)
+        ):
+            _wrap_button_text(child)
+        elif isinstance(child, QAbstractSpinBox):
+            # its minimum size ignores the suffix: squeezed, "4 hours past
+            # midnight" showed as "4 hours past m"
+            child.setMinimumWidth(min(child.sizeHint().width(), narrow - 4 * CARD_MARGIN))
+        _grow_with_text(child)
+    # message boxes are fitted by WindowManager._fit_message_box
+    if isinstance(w, QDialog) and not isinstance(w, QMessageBox):
+        _stack_wide_layouts(w)
     layout = w.layout()
     if layout is not None and layout.totalMinimumSize().width() > narrow:
         # still too wide: let the window be narrower than its layout wants
         layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+
+
+WRAPPED_PROPERTY = "kiokuWrappedText"
+
+
+class _ButtonText(QLabel):
+    """A check box's or radio button's text, wrapped: a tap on it clicks the
+    button, as a tap on the button's own text does."""
+
+    def __init__(self, button: QAbstractButton, text: str) -> None:
+        super().__init__(text)
+        self._button = button
+        self.setWordWrap(True)
+        self.setToolTip(button.toolTip())
+        self.setEnabled(button.isEnabled())
+
+    def mouseReleaseEvent(self, evt: Any) -> None:
+        if self._button.isEnabled() and self.rect().contains(evt.position().toPoint()):
+            self._button.click()
+
+    def resizeEvent(self, evt: Any) -> None:
+        # outside a scroll area a dialog's layout gives a row the height of
+        # its text on one line: the second line was cut off
+        super().resizeEvent(evt)
+        height = self.heightForWidth(self.width())
+        if height > 0 and height != self.minimumHeight():
+            self.setMinimumHeight(height)
+
+
+class _FollowButton(QObject):
+    """Keeps the wrapped text's row in step with its button: Anki hides,
+    shows and disables check boxes after building a dialog."""
+
+    def __init__(self, button: QAbstractButton, row: QWidget, label: QLabel) -> None:
+        super().__init__(button)
+        self._row, self._label = row, label
+        button.installEventFilter(self)
+
+    def eventFilter(self, obj: QObject | None, evt: QEvent | None) -> bool:
+        if evt is None or sip.isdeleted(self._row):
+            return False
+        kind = evt.type()
+        if kind == QEvent.Type.ShowToParent:
+            self._row.show()
+        elif kind == QEvent.Type.HideToParent:
+            self._row.hide()
+        elif kind == QEvent.Type.EnabledChange:
+            self._label.setEnabled(obj.isEnabled())  # type: ignore[union-attr]
+        elif kind == QEvent.Type.ToolTipChange:
+            self._label.setToolTip(obj.toolTip())  # type: ignore[union-attr]
+        return False
+
+
+def _wrap_button_text(button: QAbstractButton) -> None:
+    """A check box's text never wraps, so a long one ("Show fuzz delta next
+    to answer button intervals") made its whole page wider than the screen.
+    The text moves to a word-wrapped label beside the button, in a row that
+    takes the button's place in its layout (the button object stays, so
+    Anki's code that reads and sets it is unaffected)."""
+    if button.property(WRAPPED_PROPERTY):
+        return
+    parent = button.parentWidget()
+    layout = parent.layout() if parent is not None else None
+    if layout is None:
+        return
+    row = QWidget()
+    if layout.replaceWidget(button, row) is None:
+        row.deleteLater()
+        return
+    button.setProperty(WRAPPED_PROPERTY, True)
+    hidden = button.isHidden()
+    # "&" marks a keyboard shortcut in the button's text
+    text = button.text().replace("&&", "\0").replace("&", "").replace("\0", "&")
+    label = _ButtonText(button, text)
+    box = QHBoxLayout(row)
+    box.setContentsMargins(0, 0, 0, 0)
+    button.setText("")
+    box.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
+    box.addWidget(label, 1)
+    button.show()
+    row.setVisible(not hidden)
+    _FollowButton(button, row, label)
+
+
+def _grow_with_text(w: QWidget) -> None:
+    """A box with a fixed height (Preferences' AnkiHub group) keeps the
+    height its word-wrapped text needs at desktop width; on a phone the text
+    takes more lines and was cut off at the top and bottom. Let it grow."""
+    policy = w.sizePolicy()
+    if (
+        policy.verticalPolicy() == QSizePolicy.Policy.Fixed
+        and w.layout() is not None
+        and w.hasHeightForWidth()
+    ):
+        policy.setVerticalPolicy(QSizePolicy.Policy.Minimum)
+        w.setSizePolicy(policy)
+
+
+def _inset(layout: QLayout, top: QWidget) -> int:
+    """The horizontal space taken around layout's content by the layouts and
+    frames it sits in, up to the window top."""
+    inset = 0
+    obj: QObject | None = layout.parent()
+    while obj is not None and obj is not top:
+        if isinstance(obj, QLayout):
+            m = obj.contentsMargins()
+            inset += m.left() + m.right()
+        elif isinstance(obj, QWidget):
+            m = obj.contentsMargins()
+            inset += m.left() + m.right()
+            if obj.isWindow():
+                break
+        obj = obj.parent()
+    if obj is top and top.layout() is not None:
+        m = top.layout().contentsMargins()
+        inset += m.left() + m.right()
+    return inset
+
+
+def _room(child: QWidget, top: QWidget, narrow: int) -> int:
+    """About how wide child can be on a screen narrow wide: what the
+    layouts and frames around it leave."""
+    parent = child.parentWidget()
+    layout = parent.layout() if parent is not None else None
+    if layout is None:
+        return narrow
+    m = layout.contentsMargins()
+    # 8: frames the margins don't count (a tab widget's pane)
+    return narrow - _inset(layout, top) - m.left() - m.right() - 8
+
+
+def _depth(obj: QObject) -> int:
+    depth = 0
+    while (obj := obj.parent()) is not None:
+        depth += 1
+    return depth
+
+
+def _stack_wide_layouts(w: QWidget) -> None:
+    """Rows laid out side by side for a desktop dialog go under each other
+    when they don't fit the phone: two group boxes beside each other
+    (Preferences' Review and Answer keys), a label beside a field that needs
+    the rest of the width (Next day starts at). Innermost first, as stacking
+    a row makes the rows around it narrower."""
+    narrow = _available().width()
+    layouts = sorted(w.findChildren(QLayout), key=_depth, reverse=True)
+    for layout in layouts:
+        if isinstance(layout, QBoxLayout) and layout.direction() in (
+            QBoxLayout.Direction.LeftToRight,
+            QBoxLayout.Direction.RightToLeft,
+        ):
+            stack = _stackable_row
+        elif isinstance(layout, QGridLayout) and layout.columnCount() > 1:
+            stack = _stackable_grid
+        else:
+            continue
+        if not stack(layout, narrow - _inset(layout, w)):
+            continue
+        if isinstance(layout, QBoxLayout):
+            layout.setDirection(QBoxLayout.Direction.TopToBottom)
+        else:
+            _stack_grid(layout)
+        _invalidate_up(layout, w)
+
+
+def _invalidate_up(layout: QLayout, top: QWidget) -> None:
+    """Qt recomputes a layout's sizes when it is invalidated, but the
+    layouts around it keep their cached ones until the next event loop pass
+    (and pages of hidden tabs until shown): the rows outside a stacked row
+    still measured it at its old width."""
+    obj: QObject | None = layout
+    while obj is not None:
+        if isinstance(obj, QLayout):
+            obj.invalidate()
+        elif isinstance(obj, QWidget):
+            obj.updateGeometry()
+            if obj.layout() is not None:
+                obj.layout().invalidate()
+                obj.layout().activate()
+            if obj is top or obj.isWindow():
+                break
+        obj = obj.parent()
+
+
+def _widgets(layout: QLayout) -> list[QWidget]:
+    items = (layout.itemAt(i) for i in range(layout.count()))
+    return [it.widget() for it in items if it is not None and it.widget() is not None]
+
+
+def _own_row(layout: QLayout) -> bool:
+    """Rows of Kioku's own (title bar, tab strip, wrapped text) and of
+    windows that lay out lists, editors and web views stay as they are."""
+    parent = layout.parentWidget()
+    if isinstance(parent, (TitleBar, QDialogButtonBox, QTabBar)) or (
+        parent is not None and parent.objectName() == TAB_STRIP
+    ):
+        return True
+    for child in _widgets(layout):
+        if child.property(WRAPPED_PROPERTY) or isinstance(child, (_ButtonText, QAbstractScrollArea)):
+            return True
+        if any(c.__name__ == "QWebEngineView" for c in type(child).__mro__):
+            return True
+    return False
+
+
+def _stackable_row(layout: QBoxLayout, room: int) -> bool:
+    if _own_row(layout):
+        return False
+    layout.invalidate()
+    if layout.totalMinimumSize().width() > room:
+        return True
+    groups = [c for c in _widgets(layout) if isinstance(c, QGroupBox) and not c.isHidden()]
+    return len(groups) > 1
+
+
+def _stackable_grid(layout: QGridLayout, room: int) -> bool:
+    if _own_row(layout):
+        return False
+    layout.invalidate()
+    return layout.totalMinimumSize().width() > room
+
+
+def _stack_grid(grid: QGridLayout) -> None:
+    """Each row's cells under each other, in one column: a label above its
+    field. Spacers that only pushed cells apart sideways are dropped."""
+    columns = grid.columnCount()
+    cells = []
+    while grid.count():
+        row, column, _rows, _columns = grid.getItemPosition(0)
+        item = grid.takeAt(0)
+        spacer = item.spacerItem() if item is not None else None
+        if spacer is not None and spacer.expandingDirections() == Qt.Orientation.Horizontal:
+            continue
+        cells.append((row * columns + column, item))
+    for column in range(columns):
+        grid.setColumnStretch(column, 0)
+        grid.setColumnMinimumWidth(column, 0)
+    for index, (_key, item) in enumerate(sorted(cells, key=lambda cell: cell[0])):
+        grid.addItem(item, index, 0)
 
 
 TAB_STRIP = "kiokuTabStrip"
@@ -223,14 +486,13 @@ class TabStrip(QScrollArea):
         bar.setElideMode(Qt.TextElideMode.ElideNone)
         bar.setDocumentMode(tabs.documentMode())
         self.setWidget(bar)
-        # a drag scrolls; a tap still reaches the tab under it
-        QScroller.grabGesture(self.viewport(), QScroller.ScrollerGestureType.LeftMouseButtonGesture)
-        props = QScroller.scroller(self.viewport()).scrollerProperties()
-        props.setScrollMetric(
-            QScrollerProperties.ScrollMetric.HorizontalOvershootPolicy,
-            QScrollerProperties.OvershootPolicy.OvershootAlwaysOff,
-        )
-        QScroller.scroller(self.viewport()).setScrollerProperties(props)
+        # a drag scrolls, a tap picks the tab under it. Not QScroller: it
+        # holds the press back until it knows it isn't a drag, and a tap
+        # that moved a little was taken for one, so tabs were hard to hit
+        self._press: QPoint | None = None
+        self._start = 0
+        self._dragging = False
+        bar.installEventFilter(self)
         bar.currentChanged.connect(self._bar_changed)
         tabs.currentChanged.connect(self._tabs_changed)
 
@@ -247,6 +509,31 @@ class TabStrip(QScrollArea):
         bar.setFixedSize(bar.sizeHint())
         self.setFixedHeight(bar.height())
         self._show_current()
+
+    def eventFilter(self, obj: QObject | None, evt: QEvent | None) -> bool:
+        if obj is not self._bar or evt is None:
+            return False
+        kind = evt.type()
+        if kind == QEvent.Type.MouseButtonPress:
+            self._press = evt.globalPosition().toPoint()  # type: ignore[attr-defined]
+            self._start = self.horizontalScrollBar().value()
+            self._dragging = False
+            return True
+        if kind == QEvent.Type.MouseMove and self._press is not None:
+            dx = evt.globalPosition().toPoint().x() - self._press.x()  # type: ignore[attr-defined]
+            if abs(dx) > TAP_SLOP:
+                self._dragging = True
+            if self._dragging:
+                self.horizontalScrollBar().setValue(self._start - dx)
+            return True
+        if kind == QEvent.Type.MouseButtonRelease and self._press is not None:
+            if not self._dragging:
+                index = self._bar.tabAt(evt.position().toPoint())  # type: ignore[attr-defined]
+                if index >= 0 and self._bar.isTabEnabled(index):
+                    self._bar.setCurrentIndex(index)
+            self._press = None
+            return True
+        return kind == QEvent.Type.MouseButtonDblClick
 
     def _bar_changed(self, index: int) -> None:
         self._tabs.setCurrentIndex(index)
@@ -304,7 +591,15 @@ def _scroll_pages(tabs: QTabWidget) -> None:
     blocker = QSignalBlocker(tabs)
     for i in range(tabs.count()):
         page = tabs.widget(i)
-        if isinstance(page, QAbstractScrollArea) or page.objectName() == SCROLL_PAGE:
+        if page.objectName() == SCROLL_PAGE:
+            continue
+        if isinstance(page, QAbstractScrollArea):
+            # a page that scrolls by itself (Kioku's Advanced tab) scrolled
+            # only with its scroll bar
+            if isinstance(page, QScrollArea) and not QScroller.hasScroller(page.viewport()):
+                page.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                page.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                QScroller.grabGesture(page.viewport(), QScroller.ScrollerGestureType.LeftMouseButtonGesture)
             continue
         scroll = QScrollArea()
         scroll.setObjectName(SCROLL_PAGE)
@@ -320,6 +615,23 @@ def _scroll_pages(tabs: QTabWidget) -> None:
         QScroller.grabGesture(scroll.viewport(), QScroller.ScrollerGestureType.LeftMouseButtonGesture)
     tabs.setCurrentIndex(current)
     del blocker
+    if not tabs.property(RELAYOUT_PROPERTY):
+        tabs.setProperty(RELAYOUT_PROPERTY, True)
+        tabs.currentChanged.connect(lambda _i, tabs=tabs: _relayout_page(tabs))
+
+
+RELAYOUT_PROPERTY = "kiokuRelayoutOnShow"
+
+
+def _relayout_page(tabs: QTabWidget) -> None:
+    """A page resized while its tab was hidden (rows stacked, the phone
+    turned) kept its layout at the old width when shown: its group boxes
+    ran past the screen's edge."""
+    page = tabs.currentWidget()
+    if isinstance(page, QScrollArea) and page.widget() is not None:
+        page = page.widget()
+    if page is not None and page.layout() is not None:
+        page.layout().invalidate()
 
 
 def _is_small_dialog(w: QWidget, avail: QRect) -> bool:
@@ -571,6 +883,12 @@ class WindowManager(QObject):
             if adapt is not None:
                 adapt(w, bar)
         w.setMinimumSize(0, 0)
+        layout = w.layout()
+        if isinstance(w, QDialog) and layout is not None:
+            # it fills the screen: wrapped text that needs more lines than
+            # the desktop layout made the window taller than the screen,
+            # its buttons off the bottom
+            layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         _fill(w, avail)
         self._layout(w)
 

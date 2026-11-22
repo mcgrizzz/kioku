@@ -7,7 +7,17 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication, QDialog, QTabWidget, QVBoxLayout, QWidget
+from PyQt6.QtCore import QEvent, QPointF, Qt
+from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QScrollArea,
+    QScroller,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from kioku.windows import TAB_STRIP, TabStrip, _fit_tabs
 
@@ -98,3 +108,55 @@ def test_tabs_that_fit_get_no_strip() -> None:
     dialog, tabs = make()
     _fit_tabs(tabs, 3000)
     assert strip_of(dialog) is None
+
+
+def _mouse(widget: QWidget, kind: QEvent.Type, x: int) -> None:
+    pos = QPointF(x, widget.height() / 2)
+    button = Qt.MouseButton.NoButton if kind == QEvent.Type.MouseMove else Qt.MouseButton.LeftButton
+    QApplication.sendEvent(
+        widget,
+        QMouseEvent(
+            kind, pos, QPointF(widget.mapToGlobal(pos)), button, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+
+
+def test_tap_picks_tab_even_if_the_finger_moved_a_little() -> None:
+    dialog, tabs = make()
+    _fit_tabs(tabs, 400)
+    app.processEvents()
+    bar = strip_of(dialog).widget()
+    x = bar.tabRect(2).center().x()
+    _mouse(bar, QEvent.Type.MouseButtonPress, x)
+    # the press alone doesn't switch: it may be the start of a drag
+    assert tabs.currentIndex() == 0
+    _mouse(bar, QEvent.Type.MouseMove, x + 4)
+    _mouse(bar, QEvent.Type.MouseButtonRelease, x + 4)
+    assert tabs.currentIndex() == 2
+
+
+def test_drag_scrolls_tabs_without_switching() -> None:
+    dialog, tabs = make()
+    _fit_tabs(tabs, 400)
+    app.processEvents()
+    strip = strip_of(dialog)
+    bar = strip.widget()
+    x = bar.tabRect(2).center().x()
+    _mouse(bar, QEvent.Type.MouseButtonPress, x)
+    _mouse(bar, QEvent.Type.MouseMove, x - 30)
+    _mouse(bar, QEvent.Type.MouseMove, x - 120)
+    _mouse(bar, QEvent.Type.MouseButtonRelease, x - 120)
+    assert tabs.currentIndex() == 0
+    assert strip.horizontalScrollBar().value() > 0
+
+
+def test_page_that_scrolls_by_itself_scrolls_with_a_drag() -> None:
+    # Kioku's own Advanced tab is a QScrollArea already
+    dialog, tabs = make()
+    page = QScrollArea()
+    page.setWidget(QWidget())
+    tabs.addTab(page, "Advanced")
+    _fit_tabs(tabs, 400)
+    assert tabs.widget(tabs.count() - 1) is page
+    assert QScroller.hasScroller(page.viewport())
