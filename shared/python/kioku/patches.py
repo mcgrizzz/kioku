@@ -61,6 +61,7 @@ def apply() -> None:
     _patch_profile_saving()
     _patch_ui_scale()
     _patch_bar_heights()
+    _patch_review_bar_height()
     _patch_review_menu()
     _patch_browser_columns()
     _patch_full_screen()
@@ -371,6 +372,35 @@ def _patch_bar_heights() -> None:
         original_on_height(self, qvar)
 
     AnkiWebView._onHeight = on_height
+
+
+def _patch_review_bar_height() -> None:
+    """Anki measures the bottom bar when the review screen opens, before
+    the Show Answer or answer buttons are put in it (the fork fills them in
+    once the card is drawn). On desktop the Edit and More buttons give it
+    height anyway; on a phone they are hidden (narrower than 583 px), so
+    the bar came out as tall as its border and the home indicator's padding
+    and cut its buttons off. Measure it again each time they change."""
+    from aqt.reviewer import Reviewer
+    from aqt.qt import sip
+
+    def refit(reviewer) -> None:  # type: ignore[no-untyped-def]
+        bar = getattr(reviewer.mw, "bottomWeb", None)
+        if bar is None or sip.isdeleted(bar) or getattr(bar, "hidden", False):
+            return  # Anki's "hide bottom bar during review" keeps it 1 px
+        bar.adjustHeightToFit()
+
+    def refitting(method):  # type: ignore[no-untyped-def]
+        def wrapper(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            result = method(self, *args, **kwargs)
+            refit(self)
+            return result
+
+        return wrapper
+
+    for name in ("_showAnswerButton", "_showEaseButtons"):
+        if callable(getattr(Reviewer, name, None)):
+            setattr(Reviewer, name, refitting(getattr(Reviewer, name)))
 
 
 def _patch_review_menu() -> None:
