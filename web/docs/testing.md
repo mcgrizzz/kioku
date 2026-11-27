@@ -339,3 +339,33 @@ never put more than 8 MB into one save.
 | After the fix: killed right after the first media transaction (media database not saved) | ✅ next start: nothing missing, no `removed` on the server |
 | After the fix: killed right after the media database's transaction | ✅ same |
 | After the fix: IndexedDB reads fail during loading | ✅ "Kioku couldn't load your saved collection…" note, Anki not started, all 117 saved entries kept; a normal reload starts with everything |
+
+### 2026-11-22: Anki's Python 3.13.18 and Qt 6.11.2 (Chrome, headless)
+
+The web build moved from Python 3.14.0, Qt 6.11.0 and PyQt6-sip 13.13 to
+the versions Anki 26.09.4 pins (Kioku's `shared/versions.env`; AnkiHub
+failed on 3.14 on the iPhone). `fixes.md` › Building: CPython.
+
+| Test | Result |
+| --- | --- |
+| First build: `Fatal Python error: Failed to import encodings module` (`fcntl` turned on); node harness with `-sSYSCALL_DEBUG` found `ioctl(FIOCLEX)` → EINVAL | ❌, then fixed (3.13's `config.site` as it is) |
+| Node harness (`tools/link_core.sh`): Python 3.13.18, ssl, hashlib, decimal, ctypes, `Collection` opens | ✅ |
+| `selftest.py chrome`: `Python 3.13.18`, `Starting Anki 26.09.4` | ✅ 35/35 |
+| AnkiHub 2026-11-18.1 from AnkiWeb (devexec `download_addons`, over the relay), then two more page loads with the saved profile: loads at start (137 modules, its whole setup logged), `NoteInfo` round trip, no error dialog | ✅ |
+
+### 2026-11-24: menus over pages (Chrome, headless, `boot.mjs`)
+
+Kioku Web on Anki 26.09.4 showed an `AttributeError` for `set_touchable`
+on every menu. `fixes.md` › Runtime.
+
+| Test | Result |
+| --- | --- |
+| About: Python 3.13.18, Qt 6.11.2, PyQt6 6.11.0, Anki 26.09.4 | ✅ |
+| `QMenu.popup()` over the deck list: iframes get `pointer-events: none`, a tap on the page closes the menu | ✅ |
+| Same, then a tap on Create Deck: the page takes taps again, the dialog opens | ✅ |
+| Reviewer: More opens its menu, a tap on the card closes it, Edit opens Edit Current; no error | ✅ |
+| Before the holder reported taps: with only the iframes' `pointer-events: none` (and the holder's, and the foreign window's), the tap went to the foreign window and the menu stayed open; a tap on the menu bar closed it | ❌, then fixed (`popupTap`) |
+| Deploy refused: `kioku.data.br` 53.3 MiB (Cloudflare: 25 MiB a file); site-packages had picked up the native apps' add-on extras (`kioku_programs_data`, numpy, Pillow, cryptography built for iOS, jieba). `tools/prepare_site.sh` leaves them out: site 137 → 32 MB, `kioku.data` 160 → 53 MB | ❌, then fixed |
+| After that relink: Python 3.13.18, Qt 6.11.2, Anki 26.09.4; reviewer More/tap/Edit as above | ✅ |
+| `selftest.py chrome` | ✅ 35/35 |
+

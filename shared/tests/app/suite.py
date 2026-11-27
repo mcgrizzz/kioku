@@ -509,6 +509,32 @@ def t_editor_caret():
     return "caret and a backward selection kept"
 
 
+def t_bottom_buttons():
+    """TestFlight (iPhone SE): the deck list's bottom bar buttons (Get
+    Shared, Create Deck, Import File) were desktop-sized, 32px tall with
+    11px text: on a touch screen they are at least 44px tall and the bar
+    shows them whole (webscripts.PHONE_CSS)."""
+    mw.moveToState("deckBrowser")
+    yield Until(lambda: mw.state == "deckBrowser", 10, "deck list")
+    js = ("JSON.stringify({coarse: matchMedia('(pointer: coarse)').matches,"
+          " body: document.body.scrollHeight, buttons: [...document.querySelectorAll("
+          "'#outer > #header button')].map(b => [b.textContent,"
+          " Math.round(b.getBoundingClientRect().height), parseFloat(getComputedStyle(b).fontSize)])})")
+    info = None
+    for _ in range(20):
+        info = json.loads((yield Js(mw.bottomWeb, js)) or "null")
+        if info and info["buttons"]:
+            break
+        yield 0.5
+    check(bool(info and info["buttons"]), f"no bottom bar buttons: {info}")
+    if not info["coarse"]:
+        raise Skip("no touch screen")
+    small = [b for b in info["buttons"] if b[1] < 44 or b[2] < 14]
+    check(not small, f"buttons too small [text, height, font px]: {small}")
+    yield Until(lambda: mw.bottomWeb.height() >= info["body"], 5, "bottom bar shows the buttons whole")
+    return f"{len(info['buttons'])} buttons, {info['buttons'][0][1]}px tall"
+
+
 def t_browse():
     browser = aqt.dialogs.open("Browser", mw)
     yield Until(lambda: windows_of("Browser"), 15, "Browse window")
@@ -698,6 +724,229 @@ def t_undo():
                 "the card back in the reviewer")
     mw.moveToState("deckBrowser")
     return "the review was undone, the card is shown again"
+
+
+def t_review_focus():
+    """Issue #24: after a card is answered from the bottom bar, the next
+    card's page has the keyboard focus, so its {{type:}} box takes typing."""
+    sub = col().decks.id(f"{DECK}::Focus")
+    model = col().models.by_name("Basic (type in the answer)")
+    nids = []
+    for i in (1, 2):
+        note = col().new_note(model)
+        note["Front"], note["Back"] = f"kioku focus {i}", f"answer {i}"
+        note.tags = [TAG]
+        col().add_note(note, sub)
+        nids.append(note.id)
+    focus_js = ("JSON.stringify([document.hasFocus(),"
+                " document.activeElement ? document.activeElement.id : ''])")
+    try:
+        col().decks.select(sub)
+        mw.moveToState("overview")
+        yield Until(lambda: mw.state == "overview", 10, "overview")
+        yield 1
+        # as a tap on Study Now: the page has the keyboard focus
+        mw.web.page()._web.focus(True)
+        yield 0.5
+        mw.moveToState("review")
+        yield Until(lambda: mw.state == "review" and mw.reviewer.card is not None
+                    and mw.reviewer.card.nid in nids, 15, "a type-in card")
+        first = mw.reviewer.card.id
+        main = None
+        for _ in range(20):
+            main = json.loads((yield Js(mw.web, focus_js)) or "null")
+            if main == [True, "typeans"]:
+                break
+            yield 0.5
+        check(main == [True, "typeans"], f"first card [hasFocus, activeElement] = {main}")
+        # a tap on the bottom bar's buttons leaves the keyboard focus there
+        mw.bottomWeb.page()._web.focus(True)
+        yield 0.5
+        mw.reviewer._showAnswer()
+        yield Until(lambda: mw.reviewer.state == "answer", 10, "answer shown")
+        yield 0.5
+        mw.bottomWeb.page()._web.focus(True)
+        yield 0.5
+        mw.reviewer._answerCard(3)
+        yield Until(lambda: mw.reviewer.card is not None and mw.reviewer.card.id != first
+                    and mw.reviewer.state == "question", 10, "the next card")
+        main = bottom = None
+        for _ in range(20):
+            main = json.loads((yield Js(mw.web, focus_js)) or "null")
+            bottom = json.loads((yield Js(mw.bottomWeb, focus_js)) or "null")
+            if main == [True, "typeans"] and bottom and not bottom[0]:
+                break
+            yield 0.5
+        check(main == [True, "typeans"],
+              f"card page [hasFocus, activeElement] = {main}, bottom bar = {bottom}")
+        check(bool(bottom) and not bottom[0], f"the bottom bar kept the focus: {bottom}")
+        # iOS: WebKit takes typing (shows the keyboard) only once it started
+        # its input session; a script's focus() alone left the box focused
+        # in the page, yet the keys went elsewhere
+        typing = getattr(mw.web.page()._web, "typing_focus", None)
+        if typing is not None:
+            ok = False
+            for _ in range(20):
+                ok = typing()
+                if ok:
+                    break
+                yield 0.5
+            check(ok, "the next card's typing box has the page's focus, but WebKit"
+                  " started no input session (no keyboard, keys go elsewhere)")
+            # type as the on-screen keyboard does (its Return is a key
+            # event, not text: not emulated here)
+            web = mw.web.page()._web
+            web.type_text("kioku")
+            typed = ""
+            for _ in range(20):
+                typed = yield Js(mw.web, "document.getElementById('typeans').value")
+                if typed == "kioku":
+                    break
+                yield 0.25
+            check(typed == "kioku", f"typing reached the box: {typed!r}")
+    finally:
+        mw.moveToState("deckBrowser")
+        col().remove_notes(nids)
+        col().decks.remove([sub])
+    return "the next card's typing box has the keyboard focus"
+
+
+def t_review_keys():
+    """A hardware keyboard in the reviewer on Android: after a page was
+    tapped, Space and 1-4 reach Anki's shortcuts, a key no shortcut takes
+    reaches the card's keydown listener, and the {{type:}} box keeps every
+    key (KiokuKeys)."""
+    if sys.platform != "android":
+        raise Skip("Android's key routing (iOS: kioku_platform.keys)")
+    from aqt import dialogs
+    from kioku_platform import bridge
+
+    SPACE, KEY_3, KEY_E, KEY_J = 62, 10, 33, 38
+
+    def press(code: int) -> None:
+        bridge.call("keys.test", code=code, down=True)
+        bridge.call("keys.test", code=code, down=False)
+
+    def editing():
+        return bridge.call("keys.editing")
+
+    def editors() -> list:
+        return [d[1] for name, d in dialogs._dialogs.items()
+                if name in ("EditCurrent", "NewEditCurrent") and d[1] is not None]
+
+    sub = col().decks.id(f"{DECK}::Keys")
+    model = col().models.by_name("Basic (type in the answer)")
+    nids = []
+    for i in (1, 2):
+        note = col().new_note(model)
+        note["Front"], note["Back"] = f"kioku keys {i}", f"answer {i}"
+        note.tags = [TAG]
+        col().add_note(note, sub)
+        nids.append(note.id)
+    try:
+        col().decks.select(sub)
+        mw.moveToState("overview")
+        yield Until(lambda: mw.state == "overview", 10, "overview")
+        yield 1
+        mw.web.page()._web.focus(True)  # as a tap on Study Now
+        yield 0.5
+        mw.moveToState("review")
+        yield Until(lambda: mw.state == "review" and mw.reviewer.card is not None
+                    and mw.reviewer.card.nid in nids, 15, "a type-in card")
+        first = mw.reviewer.card.id
+        yield Until(lambda: editing() is True, 10, "the typing box focused")
+        # the typing box keeps every key: "e" is typed, the editor stays shut
+        press(KEY_E)
+        typed = ""
+        for _ in range(20):
+            typed = yield Js(mw.web, "document.getElementById('typeans').value")
+            if typed == "e":
+                break
+            yield 0.25
+        check(typed == "e", f"typing box holds {typed!r}")
+        check(not editors(), "'e' opened the editor")
+        # outside a text field a key no shortcut takes reaches the card
+        yield Js(mw.web, "window.__kiokuKeys=[];document.addEventListener('keydown',"
+                         "function(e){window.__kiokuKeys.push(e.key);});"
+                         "document.activeElement.blur();")
+        yield Until(lambda: editing() is False, 10, "the typing box left")
+        press(KEY_J)
+        keys: list = []
+        for _ in range(20):
+            keys = json.loads((yield Js(mw.web, "JSON.stringify(window.__kiokuKeys)")) or "[]")
+            if "j" in keys:
+                break
+            yield 0.25
+        check("j" in keys, f"the card's keydown listener got {keys}")
+        # Anki's shortcuts after a tap on the bottom bar
+        mw.bottomWeb.page()._web.focus(True)
+        yield 0.5
+        press(SPACE)
+        yield Until(lambda: mw.reviewer.state == "answer", 10, "Space showing the answer")
+        keys = json.loads((yield Js(mw.web, "JSON.stringify(window.__kiokuKeys)")) or "[]")
+        check(" " not in keys, f"the page got Space as well: {keys}")
+        mw.bottomWeb.page()._web.focus(True)
+        yield 0.5
+        press(KEY_3)
+        yield Until(lambda: mw.reviewer.card is not None and mw.reviewer.card.id != first
+                    and mw.reviewer.state == "question", 10, "3 answering Good")
+    finally:
+        for editor in editors():
+            editor.close()
+        mw.moveToState("deckBrowser")
+        col().remove_notes(nids)
+        col().decks.remove([sub])
+    return "Space and 3 answer, j reaches the card, the typing box keeps e"
+
+
+def t_card_keys():
+    """Issue #31, iOS: a key pressed outside a text field goes to Qt first
+    (kioku_platform.keys) and WebKit takes no keys then; one that no
+    shortcut took reaches the card's keydown listener with no element
+    focused, as on desktop Anki."""
+    import kioku_platform
+    from PyQt6.QtCore import QEvent, Qt
+    from PyQt6.QtGui import QKeyEvent
+    from PyQt6.QtWidgets import QApplication
+
+    if not getattr(kioku_platform.WebView, "KEYS_AS_SCRIPT", False):
+        raise Skip("keys reach the page natively (Android: review-keys)")
+    sub = col().decks.id(f"{DECK}::CardKeys")
+    note = col().new_note(col().models.by_name("Basic"))
+    note["Front"], note["Back"] = "kioku card keys", "answer"
+    note.tags = [TAG]
+    col().add_note(note, sub)
+    try:
+        col().decks.select(sub)
+        mw.moveToState("review")
+        yield Until(lambda: mw.state == "review" and mw.reviewer.card is not None
+                    and mw.reviewer.card.nid == note.id, 15, "the card")
+        yield 1
+        yield Js(mw.web, "window.__kiokuKeys=[];['keydown','keypress','keyup'].forEach("
+                         "function(t){document.addEventListener(t,function(e){"
+                         "window.__kiokuKeys.push(t+':'+e.key+':'+e.keyCode);});});"
+                         "if(document.activeElement)document.activeElement.blur();")
+        mw.web.setFocus()
+        none = Qt.KeyboardModifier.NoModifier
+        for key, text in ((Qt.Key.Key_J, "j"), (Qt.Key.Key_Left, "")):
+            for kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+                QApplication.sendEvent(mw.web, QKeyEvent(kind, key, none, text))
+        want = ["keydown:j:74", "keypress:j:74", "keyup:j:74",
+                "keydown:ArrowLeft:37", "keyup:ArrowLeft:37"]
+        got = None
+        for _ in range(20):
+            got = json.loads((yield Js(mw.web, "JSON.stringify(window.__kiokuKeys)")) or "null")
+            if got == want:
+                break
+            yield 0.25
+        check(got == want, f"the card's listener got {got}")
+        check(mw.reviewer.card.nid == note.id and mw.reviewer.state == "question",
+              "a key handed to the page also acted in Anki")
+    finally:
+        mw.moveToState("deckBrowser")
+        col().remove_notes([note.id])
+        col().decks.remove([sub])
+    return "a key no shortcut took reached the card's keydown listener"
 
 
 class _PadRecorder:
@@ -910,6 +1159,72 @@ def t_deck_browser():
     text = yield body_text(mw.web)
     check(DECK in (text or ""), "deck list doesn't show the test deck")
     return "deck list shows the deck"
+
+
+def _deck_name_size() -> Js:
+    """[on-screen height of the test deck's name, page width beyond the
+    window]: CSS px times the pinch scale times device pixels, so text that
+    only gets smaller CSS px while the scale grows doesn't count as zoomed."""
+    return Js(mw.web, """(() => {
+const a = [...document.querySelectorAll('a.deck')].find(a => a.innerText.includes(%s));
+if (!a) return null;
+const scale = (window.visualViewport ? visualViewport.scale : 1) * devicePixelRatio;
+return [a.getBoundingClientRect().height * scale,
+        document.documentElement.scrollWidth - window.innerWidth];
+})()""" % json.dumps(DECK))
+
+
+HEATMAP_LIKE_JS = """(() => {
+const box = document.createElement('div');
+box.id = 'kioku-test-chart';
+box.innerHTML = '<div style="display:inline-block"><div><div style="float:right"><span id="kioku-test-chart-btn" style="padding:2px 8px">B</span></div><div style="clear:both"></div></div>'
+  + '<svg width="636" height="109"><rect width="636" height="109" fill="#ccc"/></svg></div>';
+document.body.appendChild(box);
+window.__kioku_chart = () => {
+  const svg = box.querySelector('svg').getBoundingClientRect();
+  const btn = document.getElementById('kioku-test-chart-btn').getBoundingClientRect();
+  return {svg: svg.right, button: btn.right, room: document.documentElement.clientWidth,
+          scroll: document.documentElement.scrollWidth - window.innerWidth};
+};
+return true;
+})()"""
+
+
+def t_page_zoom():
+    # TestFlight (iPad): View › Zoom In moved the page right, the text
+    # stayed the same size (WKWebView pageZoom; kioku_platform.webview)
+    mw.moveToState("deckBrowser")
+    yield Until(lambda: mw.state == "deckBrowser", 10, "deck list")
+    yield 1
+    before = yield _deck_name_size()
+    check(bool(before), "test deck not on the deck list")
+    try:
+        for _ in range(3):
+            mw.form.actionZoomIn.trigger()
+        yield 1.5
+        zoomed = yield _deck_name_size()
+        check(bool(zoomed), "test deck gone after Zoom In")
+        ratio = zoomed[0] / before[0]
+        check(ratio > 1.2, f"Zoom In x3 (130%) made the text {ratio:.2f}x as tall")
+        check(zoomed[1] <= 1, f"zoomed page is {zoomed[1]} px wider than the window")
+        # TestFlight (iPhone, 0.2.9 zoomed): Review Heatmap's chart and its
+        # buttons ran off the right side. A chart like it: a 636px SVG in an
+        # inline-block with a button floated right (kioku.webscripts fitCharts)
+        chart = yield Js(mw.web, HEATMAP_LIKE_JS)
+        yield 1
+        chart = yield Js(mw.web, "window.__kioku_chart()")
+        check(bool(chart), "chart not on the deck list")
+        check(chart["svg"] <= chart["room"] + 1 and chart["button"] <= chart["room"] + 1,
+              f"chart ends at {chart['svg']} px, its button at {chart['button']} px, window {chart['room']} px")
+        check(chart["scroll"] <= 1, f"zoomed page with the chart is {chart['scroll']} px wider than the window")
+    finally:
+        mw.web.eval("document.getElementById('kioku-test-chart') && document.getElementById('kioku-test-chart').remove()")
+        mw.form.actionResetZoom.trigger()
+    yield 1.5
+    reset = yield _deck_name_size()
+    back = reset[0] / before[0]
+    check(0.95 < back < 1.05, f"Reset Zoom left the text {back:.2f}x as tall")
+    return f"130%: text {ratio:.2f}x, no sideways scroll, a wide chart fits; reset restores"
 
 
 def t_stats():
@@ -1142,6 +1457,192 @@ def t_programs():
     return ", ".join(results)
 
 
+def t_main_window_keyboard():
+    """Issue #4: on Android before 15 the keyboard's adjustResize resized
+    the main window, which Qt keeps maximized, and Android showed its new
+    surface above the Add window for a few frames (menu bar and black
+    around the editor). The main window keeps the size it has without the
+    keyboard, like the other windows (windows._fill_main)."""
+    if sys.platform != "android":
+        raise Skip(sys.platform)
+    import aqt
+    from aqt.qt import Qt
+    from kioku import windows
+
+    yield 0
+    mw = aqt.mw
+    states = mw.windowHandle().windowStates()
+    check(not states & Qt.WindowState.WindowMaximized, f"main window maximized: {states}")
+    avail = windows._available()
+    geo = mw.geometry()
+    check(geo.top() == avail.top() and geo.width() == avail.width() and geo.bottom() >= avail.bottom(),
+          f"main window {geo.getRect()} doesn't cover {avail.getRect()}")
+    return f"normal, {geo.width()}x{geo.height()}"
+
+
+def t_main_keyboard_bar():
+    """Android: the main window keeps its size while the keyboard is open
+    (windows._fill_main), so on Android 11 to 14 the reviewer's bottom bar
+    (Show Answer) stayed under the keyboard that its typing box opened.
+    kioku.screenedges keeps the window out of the part the keyboard covers.
+    A Qt line edit in the main window opens the keyboard here (a tap in the
+    page does the same in use)."""
+    if sys.platform != "android":
+        raise Skip(sys.platform)
+    import aqt
+    from aqt.qt import QGuiApplication, QLineEdit
+
+    mw = aqt.mw
+    im = QGuiApplication.inputMethod()
+    edit = QLineEdit(mw)
+    edit.setGeometry(0, mw.height() // 4, mw.width(), 40)
+    edit.show()
+    try:
+        edit.setFocus()
+        yield 0.3
+        im.show()
+        yield Until(lambda: im.isVisible() and not im.keyboardRectangle().isEmpty(), 10,
+                    "keyboard and its rectangle")
+        yield 1
+        ratio = mw.screen().devicePixelRatio()
+        top = im.keyboardRectangle().top() / ratio
+        bar = mw.bottomWeb
+        bottom = bar.mapToGlobal(bar.rect().bottomLeft()).y()
+        margin = mw.contentsMargins().bottom()
+    finally:
+        im.hide()
+        edit.deleteLater()
+    yield Until(lambda: not im.isVisible(), 10, "keyboard closed")
+    yield 0.5
+    check(bottom <= top + 1, f"bottom bar ends at y {bottom}, keyboard starts at {top:.0f}")
+    after = mw.contentsMargins().bottom()
+    check(after < margin, f"bottom margin {after} kept after the keyboard closed (was {margin})")
+    return f"bar ends {bottom}, keyboard at {top:.0f}, margin {margin} -> {after}"
+
+
+def t_keyboard_window_size():
+    """Issue #4: on Android 11 to 14 the keyboard's adjustResize resized the
+    app's window, and for a few frames Android showed the main window (drawn
+    on its own surface below) in place of the Browse, Add or Edit window.
+    KiokuActivity.onWindowAttributesChanged makes it adjustPan there: the
+    window keeps its size (Qt's available geometry stays) and Qt still gets
+    the keyboard's place (keyboardRectangle, which adjustNothing lost)."""
+    if sys.platform != "android":
+        raise Skip(sys.platform)
+    import platform
+
+    level = platform.android_ver().api_level
+    if not 30 <= level <= 34:
+        raise Skip(f"Android API {level}")
+    from aqt.qt import QGuiApplication, QRect
+
+    im = QGuiApplication.inputMethod()
+    screen = QGuiApplication.primaryScreen()
+    before = screen.availableGeometry()
+    heights = [before.height()]
+
+    def changed(rect: QRect) -> None:
+        heights.append(rect.height())
+
+    screen.availableGeometryChanged.connect(changed)
+    browser = aqt.dialogs.open("Browser", mw)
+    try:
+        yield Until(lambda: windows_of("Browser"), 15, "Browse window")
+        browser.form.searchEdit.lineEdit().setFocus()
+        yield 0.3
+        im.show()
+        yield Until(lambda: im.isVisible() and not im.keyboardRectangle().isEmpty(), 10,
+                    "keyboard and its rectangle")
+        yield 1
+        kbd = im.keyboardRectangle()
+    finally:
+        im.hide()
+        screen.availableGeometryChanged.disconnect(changed)
+        close_window(browser)
+    yield Until(lambda: not im.isVisible(), 10, "keyboard closed")
+    check(min(heights) == before.height(),
+          f"available height {before.height()} went down to {min(heights)} with the keyboard")
+    return f"window kept {before.width()}x{before.height()}, keyboard at y {kbd.y():.0f}"
+
+
+def t_symbol_glyphs():
+    """Symbols in Anki's Qt windows come from a font that has them. On
+    Android, Qt falls back only to the fonts QT_ANDROID_FONTS names, and the
+    system's Noto Sans Symbols file it kept for the family was the small
+    one: the Add window showed "History" with a box for Anki's down arrow
+    (kioku_platform._symbol_fonts, install_fonts)."""
+    from PyQt6.QtGui import QTextLayout
+    from aqt.utils import downArrow
+
+    yield 0
+    missing = []
+    for char in downArrow() + "\u25bc\u25b6\u2605\u2713":
+        layout = QTextLayout(char, QApplication.font())
+        layout.beginLayout()
+        layout.createLine()
+        layout.endLayout()
+        runs = layout.glyphRuns()
+        if not any(run.rawFont().supportsCharacter(ord(char)) for run in runs):
+            missing.append(f"U+{ord(char):04X}")
+    check(not missing, f"no font has {missing}")
+    return "all drawn"
+
+
+def t_accessibility():
+    """Issue #22: with an accessibility service on that is not a screen
+    reader (password managers, Xiaomi's and Samsung's system services), Qt's
+    accessibility bridge made each of the service's queries wait for the Qt
+    main thread and the app lagged. Kioku keeps the bridge only for screen
+    readers (KiokuActivity.screenReaderOn). Meaningful with a service on:
+    apptest on the emulator with Accessibility Menu or TalkBack."""
+    if sys.platform != "android":
+        raise Skip(sys.platform)
+    from kioku_platform import bridge
+
+    # Qt's QtAccessibilityDelegate reads it when a service turns on (this
+    # PyQt6 has no QAccessible to ask Qt directly)
+    state = bridge.call("accessibility")
+    yield 0
+    disabled = os.environ.get("QT_ANDROID_DISABLE_ACCESSIBILITY") == "1"
+    if state["screenReader"]:
+        check(not disabled, f"screen reader on but Qt accessibility off: {state}")
+        return "screen reader: Qt accessibility on"
+    check(disabled, f"no screen reader but Qt accessibility allowed: {state}")
+    return "service, no screen reader: Qt accessibility off" if state["enabled"] else "no service"
+
+
+def t_ankiweb_service():
+    """A sync that ends at once stopped KiokuAnkiWebService before Android's
+    UI thread had run its startForeground(); Android 11 and older then
+    closed the app ("Context.startForegroundService() did not then call
+    Service.startForeground()", a Realme 5 Pro after logging in). Starts it
+    twice (sync, then a title change) and stops it in the same breath: the
+    app has to survive and the service has to be gone afterwards. Only
+    Android 11 and older crashed without the fix (M30s, API 30 emulator)."""
+    if sys.platform != "android":
+        raise Skip(sys.platform)
+    from kioku import ankiwebsync
+    from kioku_platform import bridge
+
+    # a logged-in profile syncs at start
+    yield Until(lambda: not ankiwebsync._service_running, 120, "sync at start to end")
+    # posted to Android's UI thread, run back to back as after a blocked one
+    bridge.call("ankiWebService", running=True, title="")
+    bridge.call("ankiWebService", running=True, title="Kioku test")
+    bridge.call("ankiWebService", running=False, title="")
+    # the state is read on this thread at once, maybe before the posted calls
+    # ran: give them, and a crash without the fix (within about a second),
+    # 3 s first
+    begun = time.monotonic()
+    stopped = {"running": False, "pending": False}
+    yield Until(lambda: time.monotonic() - begun > 3
+                and bridge.call("ankiWebService.state") == stopped, 15, "service stopped")
+    import platform
+
+    api = platform.android_ver().api_level
+    return f"start, start, stop at once: app alive, service stopped (API {api})"
+
+
 def t_microphone():
     """Issue #19: an add-on recording through AVAudioRecorder (rubicon-objc)
     needs NSMicrophoneUsageDescription, else iOS ends the app. Records a
@@ -1194,6 +1695,118 @@ def t_microphone():
     return f"recorded {seconds:.1f} s, {size} bytes"
 
 
+def safe_css(web: AnkiWebView, want: str):
+    """The page's --kioku-safe-* properties, once they are want (or 5 s)."""
+    css = None
+    for _ in range(20):
+        css = yield Js(web, "(() => { const s = getComputedStyle(document.documentElement);"
+                            " return ['top','right','bottom','left'].map("
+                            "x => s.getPropertyValue('--kioku-safe-' + x).trim()).join(' '); })()")
+        if css == want:
+            break
+        yield 0.25
+    return css
+
+
+def t_addon_window():
+    """Issues #32, #33: an add-on window that asks for it has no title bar
+    and reaches the screen's edges, its page padded by --kioku-safe-*; it
+    fills the screen before it is first drawn; add-ons can hide Anki's
+    menu row."""
+    from aqt.qt import QDialog, QMargins, QVBoxLayout
+    from kioku import windows
+
+    w = QDialog(mw)
+    w.setWindowTitle("Kioku add-on window test")
+    QVBoxLayout(w).setContentsMargins(0, 0, 0, 0)
+    web = AnkiWebView(parent=w)
+    w.layout().addWidget(web)
+    web.stdHtml("<p id=kt>add-on page</p>")
+    w.setProperty("kioku_hide_titlebar", True)
+    w.setProperty("kioku_edge_to_edge", True)
+    w.resize(300, 200)
+    w.show()
+    try:
+        avail = windows._available()
+        size = w.size()
+        check(size.width() >= avail.width() and size.height() >= avail.height(),
+              f"{size.width()}x{size.height()} when shown, screen {avail.width()}x{avail.height()}")
+        yield 0.5
+        check(windows.WindowManager._bar(w) is None, "title bar added")
+        m = w.contentsMargins()
+        # Android: the window is a pixel taller than the screen (windows._fill)
+        check((m.left(), m.top(), m.right(), m.bottom()) == (0, 0, 0, windows._overhang(w)),
+              f"margins {(m.left(), m.top(), m.right(), m.bottom())}")
+        safe = QMargins(w.windowHandle().safeAreaMargins())
+        # Android: minus the window's pixel below the screen, whose margin is set
+        safe.setBottom(max(0, safe.bottom() - windows._overhang(w)))
+        area = windows.safe_area(w)
+        check(area == safe, f"safe_area {(area.left(), area.top(), area.right(), area.bottom())}"
+              f" != {(safe.left(), safe.top(), safe.right(), safe.bottom())}")
+        want = " ".join(f"{v}px" for v in (safe.top(), safe.right(), safe.bottom(), safe.left()))
+        css = yield from safe_css(web, want)
+        check(css == want, f"page has {css!r}, safe area {want}")
+        # given back the title bar, the window keeps out of the status bar
+        w.setProperty("kioku_hide_titlebar", False)
+        w.setProperty("kioku_edge_to_edge", False)
+        yield 0.3
+        m = w.contentsMargins()
+        check(m.top() == safe.top() + windows.BAR_HEIGHT and windows.safe_area(w) == QMargins(),
+              f"with title bar: top margin {m.top()}")
+        css = yield from safe_css(web, "0px 0px 0px 0px")
+        check(css == "0px 0px 0px 0px", f"page kept {css!r} after edge to edge was turned off")
+        # the menu row
+        bar = mw.form.menubar
+        mw.setProperty("kioku_hide_menu_row", True)
+        check(bar.maximumHeight() == 0, "menu row still shown")
+        mw.setProperty("kioku_hide_menu_row", None)
+        check(bar.maximumHeight() > 0 or mw.fullscreen or not mw.pm.meta.get("kioku_menu_row", True),
+              "menu row not given back")
+    finally:
+        mw.setProperty("kioku_hide_menu_row", None)
+        w.close()
+    return f"safe area {want}"
+
+
+def t_safe_mode_request():
+    """Issue #32: the app icon's "Start in Safe Mode" while Kioku runs
+    leaves a request (iOS: the scene delegate's shortcut method, added in
+    main.mm) and Kioku offers to close; Cancel drops the request."""
+    from aqt.qt import QMessageBox
+    from kioku import safemode
+
+    request = os.path.join(kioku_platform.documents_dir(), safemode.REQUEST)
+    check(not os.path.exists(request), "a request was left from before")
+    how = "request file"
+    if sys.platform == "ios":
+        from rubicon.objc import ObjCClass
+        from kioku_platform.webview import prop
+
+        app = prop(ObjCClass("UIApplication"), "sharedApplication")
+        scene = prop(app, "connectedScenes").anyObject()
+        item = ObjCClass("UIApplicationShortcutItem").alloc().initWithType_localizedTitle_(
+            "io.ankidesk.kioku.safe-mode", "Start in Safe Mode")
+        prop(scene, "delegate").windowScene_performActionForShortcutItem_completionHandler_(scene, item, None)
+        how = "scene delegate's shortcut method"
+    else:
+        open(request, "w").close()
+    try:
+        check(os.path.exists(request), f"no request from the {how}")
+        safemode._request_while_running()
+        boxes = lambda: [w for w in QApplication.topLevelWidgets()  # noqa: E731
+                         if isinstance(w, QMessageBox) and w.isVisible() and "safe mode" in w.text()]
+        yield Until(lambda: boxes(), 10, "the offer to close Kioku")
+        box = boxes()[0]
+        labels = [b.text() for b in box.buttons()]
+        check("Close Kioku" in labels, f"buttons {labels}")
+        box.button(QMessageBox.StandardButton.Cancel).click()
+        yield Until(lambda: not os.path.exists(request), 5, "request dropped on Cancel")
+    finally:
+        if os.path.exists(request):
+            os.remove(request)
+    return f"{how}, offer to close, Cancel dropped it"
+
+
 def t_https():
     if not NETWORK:
         raise Skip("network tests turned off")
@@ -1231,12 +1844,17 @@ TESTS = [
     ("editor-formatting", t_editor_formatting),
     ("editor-caret", t_editor_caret),
     ("deck-list", t_deck_browser),
+    ("page-zoom", t_page_zoom),
+    ("bottom-buttons", t_bottom_buttons),
     ("browse", t_browse),
     ("browse-columns", t_browse_columns),
     ("numpad-done", t_numpad_done),
     ("study", t_study),
     ("review", t_review),
     ("undo", t_undo),
+    ("review-focus", t_review_focus),
+    ("card-keys", t_card_keys),
+    ("review-keys", t_review_keys),
     ("gamepad", t_gamepad),
     ("gamepad-native", t_gamepad_native),
     ("media-server", t_review_picture),
@@ -1254,6 +1872,14 @@ TESTS = [
     ("python-packages", t_python_packages),
     ("programs", t_programs),
     ("microphone", t_microphone),
+    ("main-window-keyboard", t_main_window_keyboard),
+    ("main-keyboard-bar", t_main_keyboard_bar),
+    ("keyboard-window-size", t_keyboard_window_size),
+    ("symbol-glyphs", t_symbol_glyphs),
+    ("accessibility", t_accessibility),
+    ("ankiweb-service", t_ankiweb_service),
+    ("addon-window", t_addon_window),
+    ("safe-mode-request", t_safe_mode_request),
     ("https", t_https),
     ("cleanup", t_cleanup),
 ]

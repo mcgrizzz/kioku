@@ -2,13 +2,129 @@
 
 All releases: [GitHub Releases](https://github.com/krmanik/kioku/releases).
 
-## Next release
+## 0.2.12
 
+- iPad, iPhone, Android: a JSON error with a very large document no
+  longer closes the app; Anki shows the error instead.
+- Web on iPhone and iPad: Install from file and Import can choose
+  `.ankiaddon`, `.apkg` and `.colpkg` files; the file picker had greyed
+  them out ([issue #34](https://github.com/krmanik/kioku/issues/34)).
+- Android: the reviewer's Show Answer and answer buttons stay above the
+  on-screen keyboard while you type in a card's answer box.
+- Preferences › Hide bottom bar / Hide top bar during review on a touch
+  screen: tap the card to show the hidden bars, tap again to hide them.
+  Answering hides them again. Before, the answer buttons never came back
+  without a mouse.
+- Web: menus and the reviewer's buttons (Edit, More) work again. Each
+  showed an error (`'WebView' has no attribute 'set_touchable'`). A tap
+  on a page now closes an open menu, as in the apps.
+- iPhone, iPad: after you answer from the bottom buttons, the next
+  card's typing box takes the keyboard again, and the on-screen keyboard
+  comes up for it
+  ([issue #24](https://github.com/krmanik/kioku/issues/24)). Before, the
+  box looked focused but typing went nowhere and a card's own key
+  handlers got no keys until you tapped the card.
+- iPhone, iPad with a keyboard: a card's own key handlers get the keys
+  that no Anki shortcut uses, also when nothing on the card has focus,
+  as on Anki desktop
+  ([issue #31](https://github.com/krmanik/kioku/issues/31)).
+- Android 14 and older: the Add window no longer flashes black around
+  its editor when the keyboard opens or closes
+  ([issue #4](https://github.com/krmanik/kioku/issues/4)).
+- Android: the Add window's History button shows its down arrow (▾)
+  instead of a box, and other symbols in Anki's windows draw too.
+- Add-ons can hide the title bar of their windows, let them reach the
+  screen's edges (under the status bar, the home indicator and, in
+  landscape, the notch) and hide Anki's menu row
+  ([issue #32](https://github.com/krmanik/kioku/issues/32)). See
+  [Add-ons](using/addons.md#for-add-on-developers-windows-on-a-phone).
+- Windows open at their full-screen size: they no longer show at their
+  desktop size for a moment first
+  ([issue #33](https://github.com/krmanik/kioku/issues/33)).
+- iPhone in landscape: the title bar's **‹ Back** keeps clear of the
+  notch.
+- Safe mode on iPhone, iPad, Android and the web: Anki without add-ons,
+  for an add-on that keeps Kioku from starting
+  ([issue #32](https://github.com/krmanik/kioku/issues/32)). Touch and
+  hold the app icon › **Start in Safe Mode**; after a start that didn't
+  finish Kioku asks; on the web add `?safe=1`. See
+  [A broken add-on](using/addons.md#a-broken-add-on).
+
+## 0.2.11
+
+- Sync server on the phone: collections over 300 MB sync normally.
+  Before, the server asked for a full sync on every sync and then
+  refused the upload with "collection exceeds size limit"
+  ([issue #28](https://github.com/krmanik/kioku/issues/28)). The limit is
+  now 3 GB.
+- Android: no lag with accessibility services that aren't screen
+  readers, such as password managers and the phone maker's own
+  services. Qt's accessibility support now turns on only for TalkBack
+  and other screen readers
+  ([issue #22](https://github.com/krmanik/kioku/issues/22)).
+- iPhone, iPad: the app declares the location purpose string App Store
+  Connect asks for.
+- Android 11 and older: Kioku no longer closes right after logging in
+  to AnkiWeb, or when a sync ends at once. On a busy or slow phone the
+  sync's notification was taken away before Android had shown it, and
+  Android then closed the app.
+- iPhone, iPad: fixed three crashes from TestFlight reports: after a tap
+  on a menu item or button while a text field had the focus, when a
+  dialog closed while scrolling with a trackpad or mouse, and when an
+  add-on opened the list of a combo box that wasn't on screen.
+
+## 0.2.10
+
+- Manual: step-by-step guide for syncing a computer or tablet with the
+  phone's sync server over Wi-Fi, the phone's hotspot or Tailscale, based
+  on a tutorial shared in
+  [issue #25](https://github.com/krmanik/kioku/issues/25). See
+  [Sync server on the phone](features/sync-server.md).
+- iOS, Android, Termux app: no "Preferences Corrupt" message after Kioku
+  was closed during its first start, for example on the language
+  question. Anki saves its settings only later, so the next start found
+  an empty settings file. Kioku now starts as on a first run instead.
+- iOS, Android, web: Kioku runs on the Python and Qt versions desktop
+  Anki uses (Python 3.13, Qt 6.11). Before, it used Python 3.14, and some
+  add-ons failed to load there, such as AnkiHub.
+- Android: after answering a card, the next card has the keyboard focus
+  again, so a `{{type:}}` box and add-ons that listen for keys get the
+  typing ([issue #24](https://github.com/krmanik/kioku/issues/24)).
+- Android: with a hardware keyboard, Anki's shortcuts (Space, Enter,
+  1–4 in the reviewer, and the others) work after you tap a page. Before,
+  the page kept every key. Keys still reach text fields and cards that
+  listen for them.
+- Phones and tablets: the buttons under the deck list (Get Shared,
+  Create Deck, Import File) and under a deck's overview are bigger and
+  easier to tap.
+- iPhone, iPad: **View › Zoom In** and **Zoom Out** make pages bigger
+  and smaller again, as do add-ons that zoom. Before, the text stayed the
+  same size and the page only moved to the right, which also pushed
+  add-ons' charts such as Review Heatmap off the screen.
+  **Preferences › User interface size** now also zooms the pages.
+- Android: **View › Zoom In** and **Zoom Out**, add-ons that zoom and
+  **Preferences › User interface size** zoom the whole page. Before, only
+  the text got bigger.
+- iPhone, iPad: add-ons find the bundled programs (FFmpeg, MeCab,
+  Tesseract, eSpeak NG and the others) when they look for them with
+  `shutil.which()`. On a device it found none of them, so such add-ons
+  said the program was missing; running them worked.
+- Android: Kioku no longer keeps Qt's shader cache. With some graphics
+  drivers one cache file grew to almost 2 GB; Kioku read it at every
+  start, used 3 GB of memory and stopped responding (seen on the Android
+  emulator at a tablet's size).
+- Android: the editor's MathJax buttons (Equations menu) work with recent
+  versions of Android System WebView. The equation stayed plain text.
 - Termux app: Anki starts again inside the desktop. 0.2.9 left out a file
   Preferences › Advanced needs, so the desktop came up without Anki
   ([issue #13](https://github.com/krmanik/kioku/issues/13)). The Termux
   app no longer shows the Gamepad settings: its desktop gets no
   controller input.
+- Termux app: Anki runs on the Python and PyQt versions desktop Anki
+  uses (Python 3.13, PyQt 6.11), like the iPhone, iPad and Android apps.
+  Before, it used Termux's Python 3.14, and add-ons that don't work there
+  failed to load, such as AnkiBrain
+  ([issue #23](https://github.com/krmanik/kioku/issues/23)).
 - iOS: add-ons that other apps connect to, such as AnkiConnect, can keep
   answering after you leave Kioku. Turn on **Preferences › Advanced ›
   Background › Keep running in the background** (off by default). iOS

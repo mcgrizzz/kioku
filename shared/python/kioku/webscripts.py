@@ -243,6 +243,40 @@ SHADOW_SELECTION = r"""
 })();
 """
 
+# Custom elements that execCommand("insertHTML") inserts. Chromium with scoped
+# custom element registries (Android System WebView 157) gives them no
+# registry (element.customElementRegistry null), so they are never upgraded:
+# Anki's editor inserts MathJax as <anki-mathjax>, which stayed plain text and
+# broke the editor ("t.undecorate is not a function"). After an insert
+# command, give such elements the page's registry and upgrade them. Browsers
+# without customElements.initialize (WebKit, older Chromium) upgrade them
+# themselves; the script does nothing there.
+CUSTOM_ELEMENTS = r"""
+(function () {
+    var registry = window.customElements;
+    if (!registry || typeof registry.initialize !== "function") return;
+    var exec = Document.prototype.execCommand;
+    function adopt(root) {
+        var all = root.querySelectorAll("*");
+        for (var i = 0; i < all.length; i++) {
+            var el = all[i];
+            if (el.customElementRegistry === null && registry.get(el.localName)) {
+                registry.initialize(el);
+                registry.upgrade(el);
+            }
+            if (el.shadowRoot) adopt(el.shadowRoot);
+        }
+    }
+    Document.prototype.execCommand = function (command) {
+        var result = exec.apply(this, arguments);
+        if (/^insert/i.test(String(command))) {
+            try { adopt(this); } catch (e) { console.error(e); }
+        }
+        return result;
+    };
+})();
+"""
+
 VIEWPORT_META ='<meta name="viewport" content="width=device-width, initial-scale=1">'
 
 PHONE_CSS_ID = "kioku-phone"
@@ -320,6 +354,13 @@ PHONE_CSS = "".join(_rule(r) for r in (
     # so the top bar's Decks/Add/Browse/Stats kept their hover border
     "@media (hover: none) {",
     "  .header .hitem:hover { border-color: transparent; }",
+    "}",
+    # the deck list's and overview's bottom bar (Get Shared, Create Deck,
+    # Import File; Options, Custom Study) had desktop buttons, 11px text and 32px tall:
+    # too small to hit on a phone (iPhone SE). Touch-sized, as Apple's 44pt
+    "@media (pointer: coarse) {",
+    "  #outer > #header button {"
+    " font-size: 15px; min-height: 44px; box-sizing: border-box; padding: 8px 16px; margin: 4px; }",
     "}",
 ))
 
@@ -462,3 +503,133 @@ VIEWPORT = VIEWPORT.replace("__PHONE_CSS_ID__", PHONE_CSS_ID).replace(
 # Injection times understood by every backend
 AT_DOCUMENT_START = 0
 AT_DOCUMENT_END = 1
+
+
+# Page zoom (View › Zoom In/Out, Preferences › User interface size), for the
+# iOS and Android web views (kioku_platform.webview.set_zoom).
+# WKWebView's pageZoom doesn't zoom on iOS: the page keeps its layout width
+# and WebKit shrinks the text by as much as it scales, so the text stayed the
+# same size and the page only moved right (TestFlight, iPad). Android's text
+# zoom grows only the text, not the page (1.16x for 130%). The viewport's
+# initial scale is a real page zoom: the page is laid out for a narrower
+# window and drawn larger. Anki's pages ask for width=device-width, which
+# would keep the full width (the page then scrolls sideways), so it is
+# dropped while zoomed; any minimum/maximum scale is scaled along, so pinch
+# zooming keeps working. The page's own viewport comes back at 100%.
+# window.__kiokuZoom tells page scripts the base scale (kioku.fullscreen).
+ZOOM_JS = """(function (z) {
+    window.__kiokuZoom = z;
+    var m = document.querySelector('meta[name="viewport"]');
+    if (!m) {
+        if (z === 1 || !document.head) return;
+        m = document.createElement("meta");
+        m.name = "viewport";
+        m.setAttribute("data-kioku-viewport", "");
+        document.head.appendChild(m);
+    }
+    var own = m.getAttribute("data-kioku-viewport");
+    if (own === null) {
+        own = m.content || "";
+        m.setAttribute("data-kioku-viewport", own);
+    }
+    if (z === 1) {
+        if (own) m.content = own; else m.remove();
+        return;
+    }
+    var parts = ["initial-scale=" + z];
+    own.split(/[,;]/).forEach(function (part) {
+        var kv = part.split("="), key = kv[0].trim().toLowerCase();
+        var value = (kv[1] || "").trim();
+        if (!key || key === "width" || key === "initial-scale") return;
+        if ((key === "minimum-scale" || key === "maximum-scale") && parseFloat(value)) {
+            value = String(parseFloat(value) * z);
+        }
+        parts.push(key + "=" + value);
+    });
+    m.content = parts.join(", ");
+})(%s);"""
+
+
+def zoom_js(factor: float) -> str:
+    return ZOOM_JS % json.dumps(factor)
+
+
+# Qt key -> (KeyboardEvent.key, code, keyCode) for keys that type no text
+_SPECIAL_KEYS = {
+    0x01000000: ("Escape", "Escape", 27),
+    0x01000001: ("Tab", "Tab", 9),
+    0x01000003: ("Backspace", "Backspace", 8),
+    0x01000004: ("Enter", "Enter", 13),
+    0x01000005: ("Enter", "NumpadEnter", 13),
+    0x01000007: ("Delete", "Delete", 46),
+    0x01000010: ("Home", "Home", 36),
+    0x01000011: ("End", "End", 35),
+    0x01000012: ("ArrowLeft", "ArrowLeft", 37),
+    0x01000013: ("ArrowUp", "ArrowUp", 38),
+    0x01000014: ("ArrowRight", "ArrowRight", 39),
+    0x01000015: ("ArrowDown", "ArrowDown", 40),
+    0x01000016: ("PageUp", "PageUp", 33),
+    0x01000017: ("PageDown", "PageDown", 34),
+    0x20: (" ", "Space", 32),
+}
+_F1 = 0x01000030
+_PUNCTUATION_CODES = {
+    "-": ("Minus", 189), "=": ("Equal", 187), "[": ("BracketLeft", 219),
+    "]": ("BracketRight", 221), "\\": ("Backslash", 220), ";": ("Semicolon", 186),
+    "'": ("Quote", 222), ",": ("Comma", 188), ".": ("Period", 190),
+    "/": ("Slash", 191), "`": ("Backquote", 192),
+}
+
+KEY_EVENT_JS = """(function (types, init) {
+    var target = document.activeElement || document.body || document.documentElement;
+    if (!target) return;
+    for (var i = 0; i < types.length; i++) {
+        var e = new KeyboardEvent(types[i], Object.assign(
+            {bubbles: true, cancelable: true, composed: true}, init));
+        // which/keyCode are read-only getters returning 0 on synthetic events
+        Object.defineProperty(e, "keyCode", {value: init.keyCode});
+        Object.defineProperty(e, "which", {value: init.keyCode});
+        Object.defineProperty(e, "charCode", {value: types[i] == "keypress" ? init.charCode : 0});
+        if (!target.dispatchEvent(e)) break;
+    }
+})(%s, %s);"""
+
+
+def key_event_js(
+    key: int, text: str, shift: bool, ctrl: bool, alt: bool, meta: bool,
+    down: bool, repeat: bool = False,
+) -> str | None:
+    """A script that hands a key Qt got (and no shortcut took) to the page
+    as KeyboardEvents, as desktop Anki's web views get every key no
+    shortcut takes: a card's own keydown listener (issue #31). key is
+    Qt.Key, text the text it types; None for keys a page has no use for
+    (modifiers alone). keypress follows keydown for keys that type text."""
+    if key in _SPECIAL_KEYS:
+        name, code, key_code = _SPECIAL_KEYS[key]
+    elif _F1 <= key < _F1 + 12:
+        n = key - _F1 + 1
+        name, code, key_code = f"F{n}", f"F{n}", 111 + n
+    elif len(text) == 1 and text.isprintable():
+        name = text
+        base = chr(key).lower() if 0x20 < key < 0x7F else text.lower()
+        if base.isascii() and base.isalpha():
+            code, key_code = f"Key{base.upper()}", ord(base.upper())
+        elif base.isascii() and base.isdigit():
+            code, key_code = f"Digit{base}", ord(base)
+        else:
+            code, key_code = _PUNCTUATION_CODES.get(base, ("", 0))
+    else:
+        return None
+    init = {
+        "key": name, "code": code, "keyCode": key_code,
+        "charCode": ord(name) if len(name) == 1 else (13 if name == "Enter" else 0),
+        "shiftKey": shift, "ctrlKey": ctrl, "altKey": alt, "metaKey": meta,
+        "repeat": repeat,
+    }
+    if not down:
+        types = ["keyup"]
+    elif init["charCode"] and not (ctrl or meta):
+        types = ["keydown", "keypress"]
+    else:
+        types = ["keydown"]
+    return KEY_EVENT_JS % (json.dumps(types), json.dumps(init))
