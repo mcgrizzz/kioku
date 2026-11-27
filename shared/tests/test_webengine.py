@@ -497,3 +497,246 @@ def test_shadow_selection_script_is_installed(platform) -> None:
     page._web.set_user_scripts = installed.extend
     page.setHtml("<p>x</p>")
     assert (webscripts.SHADOW_SELECTION, webscripts.AT_DOCUMENT_START, True) in installed
+
+
+def _activate(widget) -> None:  # type: ignore[no-untyped-def]
+    widget.show()
+    widget.activateWindow()
+    for _ in range(20):
+        app.processEvents()
+        if QApplication.activeWindow() is widget.window():
+            return
+    raise AssertionError("window not activated")
+
+
+def test_set_focus_focuses_the_platform_view(platform) -> None:
+    """Issue #24: Anki's mw.web.setFocus() after each card side must reach
+    the native web view, or the bottom bar's page keeps the keys."""
+    view = webengine.QWebEngineView()
+    _activate(view)
+    web = view.page()._web
+    web.calls.clear()
+    view.setFocus()
+    assert "focus" in web.calls
+    view.hide()
+    web.calls.clear()
+    view.setFocus()
+    assert "focus" not in web.calls  # hidden: nothing to focus
+
+
+def test_set_focus_in_a_background_window_leaves_the_native_focus(platform) -> None:
+    """Anki refocuses the main window's view after each page load
+    (AnkiWebView.setHtml): with the Add window in front, the native focus
+    must stay there."""
+    from PyQt6.QtWidgets import QWidget
+
+    view = webengine.QWebEngineView()
+    view.show()
+    front = QWidget()
+    _activate(front)
+    try:
+        web = view.page()._web
+        web.calls.clear()
+        view.setFocus()
+        assert "focus" not in web.calls
+    finally:
+        front.close()
+        view.hide()
+
+
+def test_every_platform_web_view_can_take_the_focus() -> None:
+    root = os.path.join(os.path.dirname(__file__), "..", "..")
+    for backend in ("ios", "android", "web"):
+        path = os.path.join(root, backend, "python", "kioku_platform", "webview.py")
+        with open(path, encoding="utf-8") as f:
+            assert "    def focus(self, force: bool = False) -> None:" in f.read(), backend
+    with open(os.path.join(root, "android", "package", "src", "io", "ankidesk", "kioku",
+                           "KiokuBridge.java"), encoding="utf-8") as f:
+        assert 'case "webview.focus":' in f.read()
+    with open(os.path.join(root, "web", "shell", "kioku-web.js"), encoding="utf-8") as f:
+        assert "focus(id) {" in f.read()
+
+
+def test_a_key_no_shortcut_took_goes_back_to_the_page(platform, monkeypatch) -> None:
+    """Android sends a hardware key pressed in a page to Qt's shortcuts
+    first (KiokuKeys); one that reaches the web view widget goes back to the
+    page (a card's keydown listener)."""
+    from PyQt6.QtCore import QEvent, Qt
+    from PyQt6.QtGui import QKeyEvent
+
+    sent: list[str] = []
+    monkeypatch.setattr(platform.WebView, "key_to_page", staticmethod(sent.append), raising=False)
+    view = webengine.QWebEngineView()
+    evt = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_J, Qt.KeyboardModifier.NoModifier, "j")
+    evt.ignore()
+    view.keyPressEvent(evt)
+    assert sent == ["j"]
+    assert evt.isAccepted()
+
+
+def test_without_key_routing_a_key_stays_unhandled(platform) -> None:
+    """iOS and the web have no key_to_page (iOS routes in keys.py)."""
+    from PyQt6.QtCore import QEvent, Qt
+    from PyQt6.QtGui import QKeyEvent
+
+    assert getattr(platform.WebView, "key_to_page", None) is None
+    view = webengine.QWebEngineView()
+    evt = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_J, Qt.KeyboardModifier.NoModifier, "j")
+    view.keyPressEvent(evt)
+    assert not evt.isAccepted()
+
+
+def test_ios_hands_a_key_no_shortcut_took_to_the_page_as_events(platform, monkeypatch) -> None:
+    """Issue #31: on iOS a key pressed outside a text field goes to Qt
+    first (keys.py) and WebKit no longer takes keys; one no shortcut took
+    reaches the page as KeyboardEvents (a card's keydown listener)."""
+    from PyQt6.QtCore import QEvent, Qt
+    from PyQt6.QtGui import QKeyEvent
+
+    monkeypatch.setattr(platform.WebView, "KEYS_AS_SCRIPT", True, raising=False)
+    view = webengine.QWebEngineView()
+    scripts: list[str] = []
+    view.page()._web.evaluate = lambda js, cb: scripts.append(js)
+    none = Qt.KeyboardModifier.NoModifier
+    press = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_J, none, "j")
+    press.ignore()
+    view.keyPressEvent(press)
+    assert press.isAccepted()
+    assert '["keydown", "keypress"]' in scripts[-1] and '"key": "j"' in scripts[-1]
+    release = QKeyEvent(QEvent.Type.KeyRelease, Qt.Key.Key_J, none, "j")
+    release.ignore()
+    view.keyReleaseEvent(release)
+    assert release.isAccepted() and '["keyup"]' in scripts[-1]
+    # a modifier alone means nothing to a page
+    shift = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Shift, Qt.KeyboardModifier.ShiftModifier)
+    view.keyPressEvent(shift)
+    assert not shift.isAccepted() and len(scripts) == 2
+
+
+KEY_PAGE = r"""
+global.window = global;
+const seen = [];
+class KeyboardEvent {
+  constructor(type, init) { Object.assign(this, init); this.type = type; this.defaultPrevented = false; }
+  preventDefault() { this.defaultPrevented = true; }
+}
+global.KeyboardEvent = KeyboardEvent;
+global.document = {activeElement: null, documentElement: null, body: {
+  dispatchEvent(e) {
+    seen.push([e.type, e.key, e.code, e.keyCode, e.which, e.charCode, e.shiftKey, e.metaKey, e.repeat]);
+    if (%s && e.type === "keydown") e.preventDefault();
+    return !e.defaultPrevented;
+  }}};
+%s
+console.log(JSON.stringify(seen));
+"""
+
+
+def run_key_page(script: str | None, prevent: bool = False) -> list:
+    assert script is not None
+    out = subprocess.run(["node", "-e", KEY_PAGE % ("true" if prevent else "false", script)],
+                         capture_output=True, text=True, check=True).stdout
+    return json.loads(out)
+
+
+def test_key_event_script_makes_desktop_like_events() -> None:
+    from PyQt6.QtCore import Qt
+
+    def js(key, text="", down=True, prevent=False, **mods):  # type: ignore[no-untyped-def]
+        flags = {m: mods.get(m, False) for m in ("shift", "ctrl", "alt", "meta")}
+        return run_key_page(webscripts.key_event_js(int(key), text, down=down, **flags), prevent)
+
+    assert js(Qt.Key.Key_J, "j") == [
+        ["keydown", "j", "KeyJ", 74, 74, 0, False, False, False],
+        ["keypress", "j", "KeyJ", 74, 74, 106, False, False, False],
+    ]
+    assert js(Qt.Key.Key_J, "J", shift=True)[0][:4] == ["keydown", "J", "KeyJ", 74]
+    assert js(Qt.Key.Key_J, "j", down=False) == [["keyup", "j", "KeyJ", 74, 74, 0, False, False, False]]
+    assert js(Qt.Key.Key_Left) == [["keydown", "ArrowLeft", "ArrowLeft", 37, 37, 0, False, False, False]]
+    assert js(Qt.Key.Key_3, "3")[0][:4] == ["keydown", "3", "Digit3", 51]
+    assert js(Qt.Key.Key_Space, " ")[0][:4] == ["keydown", " ", "Space", 32]
+    assert js(Qt.Key.Key_Return, "\r")[0][:4] == ["keydown", "Enter", "Enter", 13]
+    assert js(Qt.Key.Key_F5)[0][:4] == ["keydown", "F5", "F5", 116]
+    # Command+J: keydown only, metaKey set
+    assert js(Qt.Key.Key_J, "j", meta=True) == [["keydown", "j", "KeyJ", 74, 74, 0, False, True, False]]
+    # a listener's preventDefault() on keydown cancels keypress, as in browsers
+    assert len(js(Qt.Key.Key_J, "j", prevent=True)) == 1
+    assert webscripts.key_event_js(int(Qt.Key.Key_Shift), "", False, False, False, False, True) is None
+
+
+def test_ios_web_view_hands_keys_to_the_page() -> None:
+    root = os.path.join(os.path.dirname(__file__), "..", "..")
+    with open(os.path.join(root, "ios", "python", "kioku_platform", "webview.py"),
+              encoding="utf-8") as f:
+        assert "    KEYS_AS_SCRIPT = True" in f.read()
+
+
+def test_android_routes_keyboard_keys_through_qt() -> None:
+    root = os.path.join(os.path.dirname(__file__), "..", "..")
+    src = os.path.join(root, "android", "package", "src", "io", "ankidesk", "kioku")
+    with open(os.path.join(src, "KiokuActivity.java"), encoding="utf-8") as f:
+        assert "KiokuKeys.onKey(event)" in f.read()
+    with open(os.path.join(src, "KiokuBridge.java"), encoding="utf-8") as f:
+        bridge = f.read()
+    assert 'case "keys.toPage":' in bridge and "public void editing(boolean on)" in bridge
+    with open(os.path.join(root, "android", "python", "kioku_platform", "webview.py"),
+              encoding="utf-8") as f:
+        assert '"keys.toPage"' in f.read()
+
+
+# Chromium with scoped custom element registries: execCommand("insertHTML")
+# makes elements without a registry, never upgraded (<anki-mathjax> in the
+# editor, Android System WebView 157)
+CUSTOM_ELEMENTS_PAGE = r"""
+global.window = global;
+const upgraded = [];
+const registry = {
+  get(name) { return name === "anki-mathjax" ? class {} : undefined; },
+  upgrade(el) { if (el.customElementRegistry === registry) upgraded.push(el.localName); },
+  %s
+};
+window.customElements = registry;
+class El {
+  constructor(name, reg, kids = []) { this.localName = name; this.customElementRegistry = reg; this.kids = kids; this.shadowRoot = null; }
+  querySelectorAll() { return this.kids; }
+}
+function Document() { this.kids = []; }
+Document.prototype.querySelectorAll = function () { return this.kids; };
+const field = new El("anki-editable", registry);
+const host = new El("div", registry);
+host.shadowRoot = field;
+Document.prototype.execCommand = function (command) {
+  if (command === "insertHTML") field.kids.push(new El("anki-mathjax", null), new El("b", null));
+  return true;
+};
+const doc = new Document();
+doc.kids.push(host);
+%s
+doc.execCommand("bold");
+doc.execCommand("insertHTML", false, "<anki-mathjax>x</anki-mathjax><b>y</b>");
+console.log(JSON.stringify({upgraded, registered: field.kids.map(e => e.customElementRegistry === registry)}));
+"""
+
+
+def run_custom_elements_page(with_initialize: bool) -> dict:
+    initialize = "initialize(el) { if (el.customElementRegistry === null) el.customElementRegistry = registry; },"
+    js = CUSTOM_ELEMENTS_PAGE % (initialize if with_initialize else "", webscripts.CUSTOM_ELEMENTS)
+    return json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
+
+
+def test_custom_elements_inserted_into_a_shadow_root_are_upgraded() -> None:
+    # only defined elements: <b> keeps no registry, as without the script
+    assert run_custom_elements_page(True) == {"upgraded": ["anki-mathjax"], "registered": [True, False]}
+
+
+def test_custom_elements_script_is_off_without_scoped_registries() -> None:
+    # WebKit and older Chromium upgrade inserted elements themselves
+    assert run_custom_elements_page(False) == {"upgraded": [], "registered": [False, False]}
+
+
+def test_custom_elements_script_is_installed(platform) -> None:
+    page = webengine.QWebEnginePage()
+    installed: list[tuple] = []
+    page._web.set_user_scripts = installed.extend
+    page.setHtml("<p>x</p>")
+    assert (webscripts.CUSTOM_ELEMENTS, webscripts.AT_DOCUMENT_START, True) in installed

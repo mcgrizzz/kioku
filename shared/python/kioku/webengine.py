@@ -14,6 +14,7 @@ import enum
 import inspect
 import json
 import logging
+import sys
 from typing import Any, Callable
 
 from PyQt6.QtCore import (
@@ -28,7 +29,7 @@ from PyQt6.QtCore import (
     Qt,
     pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QColor, QCursor, QGuiApplication, QIcon
+from PyQt6.QtGui import QAction, QColor, QCursor, QGuiApplication, QIcon, QKeyEvent, QWindow
 from PyQt6.QtNetwork import QNetworkCookie
 from PyQt6.QtWidgets import QApplication, QWidget
 
@@ -643,6 +644,7 @@ class QWebEnginePage(QObject, _Lenient):
             (platform.WebView.BRIDGE, start, True),
             (webscripts.PRELUDE, start, True),
             (webscripts.SHADOW_SELECTION, start, True),
+            (webscripts.CUSTOM_ELEMENTS, start, True),
             (webscripts.VIEWPORT, end, True),
         ]
         headers = self._profile._headers_for(_media_server_url(), api=True)
@@ -1015,6 +1017,61 @@ class _PopupWatcher(QObject):
 _popup_watcher: _PopupWatcher | None = None
 
 
+class _WindowOrder(QObject):
+    """Which top-level window is in front: the one shown or activated last
+    that is still visible. Qt's active window can't tell: while a page has
+    the keys, Qt has none (iOS, web), and a window just shown becomes
+    active only a moment later (Android)."""
+
+    def __init__(self, app: QApplication) -> None:
+        super().__init__(app)
+        self._order: list[QWidget] = []
+        app.installEventFilter(self)
+        app.focusWindowChanged.connect(self._activated)
+
+    def _put_in_front(self, w: QWidget) -> None:
+        if w in self._order:
+            self._order.remove(w)
+        self._order.append(w)
+
+    def eventFilter(self, obj: QObject | None, event: QEvent | None) -> bool:
+        if (
+            event is not None
+            and event.type() == QEvent.Type.Show
+            and isinstance(obj, QWidget)
+            and obj.isWindow()
+            and obj.windowType() in (Qt.WindowType.Window, Qt.WindowType.Dialog)
+        ):
+            self._put_in_front(obj)
+        return False
+
+    def _activated(self, window: QWindow | None) -> None:
+        active = QApplication.activeWindow()
+        if window is not None and active is not None:
+            self._put_in_front(active)
+
+    def front(self) -> QWidget | None:
+        for w in reversed(list(self._order)):
+            try:
+                if w.isVisible():
+                    return w
+            except RuntimeError:  # deleted
+                pass
+            self._order.remove(w)
+        return None
+
+
+_window_order: _WindowOrder | None = None
+
+
+def _in_front(widget: QWidget) -> bool:
+    """Whether the widget's window is the one the user works in."""
+    front = _window_order.front() if _window_order is not None else None
+    if front is None:
+        return QApplication.activeWindow() is widget.window()
+    return front is widget.window()
+
+
 # Where a page was last tapped, and what Qt's QCursor.pos() said then
 _tap: tuple[QPoint, QPoint] | None = None
 _qt_cursor_pos = QCursor.pos
@@ -1052,6 +1109,12 @@ class QWebEngineView(QWidget, _Lenient):
         global _popup_watcher
         if _popup_watcher is None:
             _popup_watcher = _PopupWatcher(QApplication.instance())
+        global _window_order
+        if _window_order is None:
+            _window_order = _WindowOrder(QApplication.instance())
+            active = QApplication.activeWindow()
+            if active is not None:
+                _window_order._put_in_front(active)
         platform.WebView.prepare_host(self)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._page: QWebEnginePage | None = None
@@ -1117,6 +1180,78 @@ class QWebEngineView(QWidget, _Lenient):
 
     def focusProxy(self) -> QWidget:
         return self
+
+    def setFocus(self, *args: Any) -> None:
+        """Qt's focus alone doesn't reach the platform's web view: after a
+        tap on the review screen's buttons, the bottom bar's page kept the
+        keyboard focus, so the next card's {{type:}} box (focused by Anki's
+        script) took no typing and a template's keydown listener got no
+        keys (issue #24). Anki calls setFocus() on the card's view after
+        showing each side, so give the native view the focus as well.
+        Only in the window in front: the native focus is the app's, and Anki
+        also refocuses a background window's view after each page load
+        (AnkiWebView.setHtml), which took the Add window's activation away
+        on Android."""
+        super().setFocus(*args)
+        if self._page is None or not self.isVisible() or not _in_front(self):
+            return
+        try:
+            self._page._web.focus()
+        except Exception:
+            logger.exception("focusing web view")
+
+    def keyPressEvent(self, evt: QKeyEvent | None) -> None:
+        """A key no shortcut took. On Android a hardware key pressed in a
+        page goes to Qt first (KiokuKeys), as with desktop Anki's web views:
+        hand it back to the page (a card's keydown listener, arrows
+        scrolling)."""
+        to_page = getattr(platform.WebView, "key_to_page", None)
+        if evt is not None and to_page is not None:
+            try:
+                to_page(evt.text())
+            except Exception:
+                logger.exception("key to page")
+            evt.accept()
+            return
+        if evt is not None and self._key_as_script(evt, True):
+            return
+        super().keyPressEvent(evt)
+
+    def keyReleaseEvent(self, evt: QKeyEvent | None) -> None:
+        if evt is not None and self._key_as_script(evt, False):
+            return
+        super().keyReleaseEvent(evt)
+
+    def _key_as_script(self, evt: QKeyEvent, down: bool) -> bool:
+        """iOS: a hardware key pressed outside a text field goes to Qt
+        first (kioku_platform.keys), and WebKit takes keys only while its
+        own view is UIKit's first responder, which it no longer is. So a
+        key no shortcut took reaches the page as script-made
+        KeyboardEvents: a card's keydown listener works with no element
+        focused, as on desktop Anki (issue #31)."""
+        if not getattr(platform.WebView, "KEYS_AS_SCRIPT", False) or self._page is None:
+            return False
+        mods = evt.modifiers()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        meta = bool(mods & Qt.KeyboardModifier.MetaModifier)
+        if sys.platform in ("ios", "darwin"):
+            # Qt names Command Control on Apple platforms; pages see metaKey
+            ctrl, meta = meta, ctrl
+        js = webscripts.key_event_js(
+            evt.key(), evt.text(),
+            shift=bool(mods & Qt.KeyboardModifier.ShiftModifier), ctrl=ctrl,
+            alt=bool(mods & Qt.KeyboardModifier.AltModifier), meta=meta,
+            down=down, repeat=evt.isAutoRepeat(),
+        )
+        if js is None:
+            return False
+        try:
+            self._page.runJavaScript(js)
+        except Exception:
+            logger.exception("key to page")
+            return False
+        evt.accept()
+        return True
 
     # Convenience wrappers around the page ----------------------------------
 

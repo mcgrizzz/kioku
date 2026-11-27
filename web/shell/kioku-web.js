@@ -9,6 +9,8 @@
   const frames = new Map();
   const holders = new Map();
   let parked = null;
+  // false while a Qt popup (a menu) is open (WebView.set_touchable)
+  let touchable = true;
 
   function parking() {
     if (!parked) {
@@ -30,6 +32,27 @@
       s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
     }
     return btoa(s);
+  }
+
+  // iOS and iPadOS (which reports itself as a Mac with touch)
+  function isIOS() {
+    return /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  }
+
+  // The iOS file picker greys out every file whose extension has no system
+  // type when `accept` lists it (.ankiaddon, .apkg, .colpkg: issue #34), so
+  // there `accept` is kept only when iOS knows every entry
+  const IOS_TYPES = new Set([
+    ".txt", ".csv", ".tsv", ".json", ".html", ".htm", ".xml", ".zip", ".pdf",
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".svg", ".bmp", ".tif", ".tiff",
+    ".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac", ".mp4", ".mov", ".webm",
+  ]);
+  function iosKnowsAll(accept) {
+    return accept.split(",").every((t) => {
+      t = t.trim().toLowerCase();
+      return !t || t.includes("/") || IOS_TYPES.has(t);
+    });
   }
 
   function href(frame) {
@@ -65,6 +88,11 @@
     ready() {
       while (queued.length) window.__kiokuWasmPost(queued.shift());
       return "1";
+    },
+
+    // ?safe=1: start without add-ons (kioku/safemode.py)
+    safeModeRequested() {
+      return new URLSearchParams(location.search).get("safe") === "1" ? "1" : "";
     },
 
     darkMode() {
@@ -166,6 +194,7 @@
       frame.dataset.gen = "0";
       frame.setAttribute("allow", "autoplay; clipboard-read; clipboard-write; fullscreen");
       frame.style.cssText = "border: 0; display: block; width: 100%; height: 100%; background: white;";
+      if (!touchable) frame.style.pointerEvents = "none";
       frame.addEventListener("load", () => {
         web.post({ type: "load", view: id, gen: Number(frame.dataset.gen), url: href(frame) });
       });
@@ -177,6 +206,12 @@
       holder.removeChild = function (child) {
         return child.parentNode === this ? Node.prototype.removeChild.call(this, child) : child;
       };
+      // while a Qt popup is open the iframe takes no taps and the holder
+      // gets them; Qt hands a tap on a foreign window to that window only,
+      // so the popup wouldn't close: Python closes it (popupTap)
+      holder.addEventListener("pointerdown", () => {
+        if (!touchable) web.post({ type: "popupTap" });
+      });
       parking().appendChild(frame);
       frames.set(id, frame);
       holders.set(id, holder);
@@ -204,6 +239,12 @@
       if (!frame) return;
       frame.dataset.gen = String(gen);
       frame.src = url;
+    },
+
+    // the frame takes the keyboard focus (QWebEngineView.setFocus)
+    focus(id) {
+      const frame = frames.get(id);
+      if (frame && frame.contentWindow) frame.contentWindow.focus();
     },
 
     reload(id) {
@@ -247,6 +288,13 @@
       try {
         frame.contentWindow.__kiokuResolve(call, ok, value);
       } catch (e) {}
+    },
+
+    // Off while a Qt popup (a menu) is open: a tap on a page then goes to
+    // the holder, which reports it (popupTap) and Python closes the popup
+    touchable(on) {
+      touchable = on;
+      for (const frame of frames.values()) frame.style.pointerEvents = on ? "" : "none";
     },
 
     // Qt sizes a foreign window's element in width only
@@ -303,7 +351,7 @@
       const input = document.createElement("input");
       input.type = "file";
       input.multiple = !!multi;
-      if (accept) input.accept = accept;
+      if (accept && !(isIOS() && !iosKnowsAll(accept))) input.accept = accept;
       input.style.display = "none";
       document.body.appendChild(input);
       let done = false;

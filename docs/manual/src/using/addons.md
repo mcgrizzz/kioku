@@ -140,17 +140,83 @@ All load on iPhone and Android:
 
 Full results: [docs/testing.md](https://github.com/krmanik/kioku/blob/main/docs/testing.md).
 
+## For add-on developers: windows on a phone
+
+> **Applies to:** iPhone/iPad, Android native
+
+Phones have no window manager, so Kioku shows every window except Anki's
+main window full screen, with a title bar (**‹ Back** and the window's
+title). Small dialogs show as a card in the middle of the screen. Kioku
+keeps windows clear of the status bar, the notch and the home indicator
+or gesture bar.
+
+An add-on with its own touch layout can opt out, one window at a time,
+with Qt properties. Set them before or after the window is shown. They do
+nothing on Anki desktop or on Termux.
+
+```python
+window.setProperty("kioku_hide_titlebar", True)  # no title bar
+window.setProperty("kioku_edge_to_edge", True)   # reach the screen's edges
+```
+
+- **`kioku_hide_titlebar`**: no title bar. Give the window its own way
+  back (Android's Back still closes it).
+- **`kioku_edge_to_edge`**: the window reaches under the status bar, the
+  home indicator and, in landscape, the notch. Pad your contents by the
+  safe area:
+  - in web views, with the CSS properties `--kioku-safe-top`,
+    `--kioku-safe-right`, `--kioku-safe-bottom` and `--kioku-safe-left`
+    on `<html>`. They follow a rotation.
+
+    ```css
+    body {
+      padding: var(--kioku-safe-top, 0) var(--kioku-safe-right, 0)
+               var(--kioku-safe-bottom, 0) var(--kioku-safe-left, 0);
+    }
+    ```
+  - in Qt widgets, with `kioku.windows.safe_area(window)` (a `QMargins`).
+    Read it again when the window is resized.
+
+  While the title bar is shown, the window starts below it and the top
+  inset is 0. The values are 0 for windows that aren't edge to edge.
+
+Anki's menu row (File, Edit, View…) can be hidden while your add-on needs
+the room, and given back:
+
+```python
+aqt.mw.setProperty("kioku_hide_menu_row", True)   # hide
+aqt.mw.setProperty("kioku_hide_menu_row", None)   # back to normal
+```
+
+Its shortcuts keep working. On an iPad with iPadOS 26 or later, the menus
+stay in the iPad's menu bar. On a phone they are out of reach until you
+give the row back.
+
+To check that you're running in Kioku:
+`sys.platform in ("ios", "android")`.
+
 ## A broken add-on
 
-If Kioku fails at start-up after installing an add-on:
+If an add-on keeps Kioku from starting, start in **safe mode**: Anki
+without add-ons (and without syncing automatically). Then turn the add-on
+off in **Tools › Add-ons** and start Kioku again.
 
-- **Termux:** use **Safe mode** on the error screen, then remove the add-on.
-- **iPhone, iPad:** delete the add-on's folder in Files › Kioku ›
-  `Anki2/addons21/` (Tools › Add-ons shows each add-on's folder name).
-- **Android, native:** if Kioku still opens, disable the add-on in Tools ›
-  Add-ons. Otherwise open an issue on
-  [GitHub](https://github.com/krmanik/kioku/issues): reinstalling keeps the
-  add-on.
+- **iPhone, iPad, Android (native):** touch and hold Kioku's icon and
+  choose **Start in Safe Mode**. If Kioku closed while starting the last
+  time, it also asks on the next start: **Start Without Add-ons** or
+  **Start Normally**. The log of that start is kept as
+  `kioku-previous.log` in Kioku's files.
+- **Web:** open the address with `?safe=1` at the end, or use the
+  **Start without add-ons** link on the loading page.
+- **Termux:** use **Safe mode** on the error screen.
+
+In safe mode the deck list says so. Tap **What now?** there for the way
+to Tools › Add-ons. Add-ons load again the next time Kioku starts: close it
+in the app switcher (iPhone, iPad) or Recents (Android) and open it again,
+or reload the page (web).
+
+If Kioku is already running, **Start in Safe Mode** offers to close it.
+Open it again to start in safe mode.
 
 Report add-ons that work or don't on
 [GitHub](https://github.com/krmanik/kioku/issues).

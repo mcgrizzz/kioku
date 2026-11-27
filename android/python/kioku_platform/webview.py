@@ -19,6 +19,8 @@ from PyQt6.QtCore import QEvent, QObject, QPoint, QRect, QTimer
 from PyQt6.QtGui import QWindow
 from PyQt6.QtWidgets import QWidget
 
+from kioku.webscripts import AT_DOCUMENT_END, zoom_js
+
 from . import bridge
 
 logger = logging.getLogger("kioku.webview")
@@ -58,12 +60,6 @@ def set_cookie(url: str, header: str) -> None:
 def delete_cookies(domain: str, name: str | None) -> None:
     """Delete the cookies on domain, or only `name`."""
     bridge.call("cookies.delete", domain=domain, name=name or "")
-
-
-def _main_window() -> QWidget | None:
-    import aqt
-
-    return aqt.mw
 
 
 class _FollowHost(QObject):
@@ -177,12 +173,17 @@ class WebView:
         self._callbacks: dict[int, Callable[[Any], None] | None] = {}
         self._container: QWidget | None = None
         self._host: QWidget | None = None
+        self._scripts: list[tuple[str, int, bool]] = []
+        self._zoom = 1.0
         bridge.call("webview.create", id=self.id)
         _views[self.id] = self
 
     # Scripts ---------------------------------------------------------------
 
     def set_user_scripts(self, scripts: list[tuple[str, int, bool]]) -> None:
+        self._scripts = list(scripts)
+        if self._zoom != 1.0:
+            scripts = [*scripts, (zoom_js(self._zoom), AT_DOCUMENT_END, True)]
         bridge.call(
             "webview.scripts",
             id=self.id,
@@ -199,6 +200,19 @@ class WebView:
 
     def load_html(self, html: str, base_url: str | None) -> None:
         bridge.call("webview.html", id=self.id, html=html, base=base_url)
+
+    def focus(self, force: bool = False) -> None:
+        """Move Android's focus (the keys) to the page from another page
+        that has it, as after a tap on the bottom bar's buttons. Qt's own
+        view keeps it (see KiokuBridge); force takes it from there too, as a
+        tap on the page would (tests)."""
+        bridge.call("webview.focus", id=self.id, force=force)
+
+    @staticmethod
+    def key_to_page(text: str) -> None:
+        """No shortcut took the hardware key Qt got while a page had
+        Android's focus (KiokuKeys): that page gets it."""
+        bridge.call("keys.toPage", text=text)
 
     def reload(self) -> None:
         bridge.call("webview.reload", id=self.id)
@@ -243,7 +257,15 @@ class WebView:
         bridge.call("webview.background", id=self.id, argb=argb)
 
     def set_zoom(self, factor: float) -> None:
-        bridge.call("webview.zoom", id=self.id, factor=factor)
+        """Zoom by the viewport's initial scale (kioku.webscripts.ZOOM_JS):
+        this page now, later pages from a user script. WebSettings' text zoom
+        grew only the text."""
+        factor = round(factor, 3)
+        if factor <= 0 or factor == self._zoom:
+            return
+        self._zoom = factor
+        self.set_user_scripts(self._scripts)
+        self.evaluate(zoom_js(factor), None)
 
     # Hosting ---------------------------------------------------------------
 
@@ -258,9 +280,9 @@ class WebView:
         container = QWidget.createWindowContainer(window, widget)
         _FollowHost(widget, container)
         container.show()
-        # kioku.windows keeps dialogs above the on-screen keyboard; the main
-        # window's pages keep clear of it themselves
-        bridge.call("webview.keyboardInsets", id=self.id, on=widget.window() is _main_window())
+        # kioku.windows keeps dialogs above the on-screen keyboard and
+        # kioku.screenedges the main window: no page takes its insets too
+        bridge.call("webview.keyboardInsets", id=self.id, on=False)
         self._container = container
         self._host = widget
 

@@ -47,6 +47,20 @@
         </dict>
     </array>
 
+    <!-- touch and hold the icon: Anki without add-ons (kioku/safemode.py, main.mm) -->
+    <key>UIApplicationShortcutItems</key>
+    <array>
+        <dict>
+            <key>UIApplicationShortcutItemType</key>
+            <string>io.ankidesk.kioku.safe-mode</string>
+            <key>UIApplicationShortcutItemTitle</key>
+            <string>Start in Safe Mode</string>
+            <key>UIApplicationShortcutItemSubtitle</key>
+            <string>Without add-ons</string>
+            <key>UIApplicationShortcutItemIconSymbolName</key>
+            <string>checkmark.shield</string>
+        </dict>
+    </array>
     <key>UILaunchStoryboardName</key>
     <string>LaunchScreen</string>
 
@@ -79,6 +93,10 @@
         <string>location</string>
     </array>
     <key>NSLocationWhenInUseUsageDescription</key>
+    <string>With “Keep running in the background” on, location updates keep Kioku running so add-ons such as AnkiConnect keep answering other apps. Kioku asks for the lowest accuracy and doesn’t use or store your location.</string>
+    <!-- Kioku asks only for When In Use, but the binary references the
+         Always API (App Store Connect warning ITMS-90683 without it) -->
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
     <string>With “Keep running in the background” on, location updates keep Kioku running so add-ons such as AnkiConnect keep answering other apps. Kioku asks for the lowest accuracy and doesn’t use or store your location.</string>
     <!-- approximate location unless the user turns Precise on: the
          permission is the whole app's, add-ons included -->

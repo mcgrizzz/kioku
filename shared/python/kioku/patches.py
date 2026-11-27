@@ -56,6 +56,9 @@ def apply() -> None:
     aqt.utils._kioku_fit_tooltip = _fit_tooltip
     aqt.utils.tooltip.__code__ = _tooltip.__code__
 
+    from . import prefs
+
+    prefs.install()
     _patch_app()
     _patch_audio()
     _patch_profile_saving()
@@ -66,6 +69,8 @@ def apply() -> None:
     _patch_browser_columns()
     _patch_full_screen()
     _patch_screen_edges()
+    _patch_hide_bars()
+    _patch_menu_row_property()
     _patch_native_menu_bar()
     _patch_main_view_width()
     _patch_splitters()
@@ -73,7 +78,7 @@ def apply() -> None:
     _patch_update_check()
     _patch_page_html()
     _patch_editor_media()
-    _python_313_compat()
+    _patch_combo_popup()
     _addon_platform()
 
 
@@ -179,6 +184,7 @@ def _patch_app() -> None:
     def init(self, argv):  # type: ignore[no-untyped-def]
         original_init(self, argv)
         _fix_highlighted_text(self)
+        _install_fonts()
         windows.install(self)
         _install_done_bar(self)
         mediaserver.install()
@@ -186,6 +192,15 @@ def _patch_app() -> None:
         devtools.install()
 
     aqt.AnkiApp.__init__ = init
+
+
+def _install_fonts() -> None:
+    """Android: fonts Qt needs registered once the app exists."""
+    import kioku_platform as platform
+
+    install = getattr(platform, "install_fonts", None)
+    if install is not None:
+        install()
 
 
 def _install_done_bar(app) -> None:  # type: ignore[no-untyped-def]
@@ -505,7 +520,60 @@ def _patch_screen_edges() -> None:
     screenedges.apply()
 
 
+def _patch_hide_bars() -> None:
+    from . import hidebars
+
+    hidebars.apply()
+
+
 MENU_ROW_KEY = "kioku_menu_row"
+# set on aqt.mw by add-ons (GitHub issue #32)
+HIDE_MENU_ROW = "kioku_hide_menu_row"
+
+
+def _patch_menu_row_property() -> None:
+    """Add-ons can hide Anki's menu row (File, Edit, View…) while they need
+    the room: aqt.mw.setProperty("kioku_hide_menu_row", True), and False
+    (or None) to give it back. The row then has no height, as in Anki's
+    full screen, and its shortcuts still work. On an iPhone or Android
+    phone its menus are out of reach until then; on an iPad with iPadOS 26
+    or later they stay in the iPad's menu bar. Leaving full screen, or
+    View › Show Menu Row on the iPad, keeps it hidden while the property
+    is set; the iPad's View › Show Menu Row setting itself is kept."""
+    import aqt.main
+    from aqt import gui_hooks
+    from aqt.qt import QEvent, QObject
+
+    show_menubar = aqt.main.AnkiQt.show_menubar
+
+    def show_unless_hidden(self) -> None:  # type: ignore[no-untyped-def]
+        show_menubar(self)
+        if self.property(HIDE_MENU_ROW):
+            self.form.menubar.setFixedHeight(0)
+
+    aqt.main.AnkiQt.show_menubar = show_unless_hidden
+
+    class Watch(QObject):
+        def eventFilter(self, obj, event):  # type: ignore[no-untyped-def]
+            if (
+                event.type() == QEvent.Type.DynamicPropertyChange
+                and bytes(event.propertyName()).decode() == HIDE_MENU_ROW
+            ):
+                if obj.property(HIDE_MENU_ROW):
+                    obj.form.menubar.setFixedHeight(0)
+                elif not obj.fullscreen:
+                    # the iPad's wrapper keeps it hidden if Show Menu Row is off
+                    obj.show_menubar()
+            return False
+
+    def setup() -> None:
+        mw = aqt.mw
+        mw._kioku_menu_row_watch = Watch(mw)
+        mw.installEventFilter(mw._kioku_menu_row_watch)
+        if mw.property(HIDE_MENU_ROW):
+            mw.form.menubar.setFixedHeight(0)
+
+    gui_hooks.main_window_did_init.append(setup)
 
 
 def _patch_native_menu_bar() -> None:
@@ -884,30 +952,21 @@ def _patch_audio() -> None:
     aqt.sound.setup_audio = setup_audio
 
 
-def _python_313_compat() -> None:
-    """Desktop Anki runs Python 3.13; the apps run 3.14, which dropped
-    pkgutil.find_loader() and get_loader(). Add-ons' bundled libraries still
-    call them (pytesseract in AnkiOCR)."""
-    import importlib.util
-    import pkgutil
+def _patch_combo_popup() -> None:
+    """Qt shows a combo box's list as a native menu here, placed relative to
+    the combo box's window. A combo box whose window has no native window
+    yet (never shown) makes it dereference null: an add-on calling
+    showPopup() on one crashed the app. Do nothing there instead."""
+    from aqt.qt import QComboBox
 
-    def find_loader(fullname):  # type: ignore[no-untyped-def]
-        try:
-            spec = importlib.util.find_spec(fullname)
-        except (ImportError, ValueError):
-            return None
-        return spec.loader if spec else None
+    original = QComboBox.showPopup
 
-    def get_loader(module_or_name):  # type: ignore[no-untyped-def]
-        if isinstance(module_or_name, types.ModuleType):
-            spec = getattr(module_or_name, "__spec__", None)
-            return spec.loader if spec else None
-        return find_loader(module_or_name)
+    def show_popup(self) -> None:  # type: ignore[no-untyped-def]
+        if self.window().windowHandle() is None:
+            return
+        original(self)
 
-    if not hasattr(pkgutil, "find_loader"):
-        pkgutil.find_loader = find_loader
-    if not hasattr(pkgutil, "get_loader"):
-        pkgutil.get_loader = get_loader
+    QComboBox.showPopup = show_popup  # type: ignore[method-assign]
 
 
 def _addon_platform() -> None:

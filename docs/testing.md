@@ -63,6 +63,8 @@ removes it at the end:
 | editor-formatting | Add window: on a selection in a field, bold, italic, underline, superscript, subscript (on and off again), text colour, highlight, remove formatting, MathJax inline, cloze (Cloze note); underline at the caret, then a typed letter is underlined |
 | editor-caret | Add window: a field that gets the focus back without a tap (after the next field had it) keeps its caret, and a backward selection |
 | deck-list | the deck list shows the deck |
+| page-zoom | View › Zoom In three times (130%) makes the deck list's text 1.2x+ as tall on screen (CSS px × pinch scale × device pixels) with no sideways scroll; Reset Zoom restores it |
+| bottom-buttons | on a touch screen the deck list's bottom bar buttons are at least 44px tall with 14px+ text, and the bar shows them whole |
 | browse | search, row count, the editor page shows the selected note, Add over Browse is the active window |
 | study, review, undo | overview, the picture card's question with its picture drawn, the answer, Good (review logged, next card), undo |
 | gamepad | the default controls through kioku.gamepad into Anki's shortcuts: Down highlights the test deck, A opens it, A studies, B on the question does nothing, A shows the answer, B answers Again (review logged), L1 undoes it, View and B go back |
@@ -1427,7 +1429,7 @@ Settings" status, the Info.plist key.
 Not run: an add-on written to undo the guard (it can: same process;
 documented), battery use, iPad, longer than 7 minutes, App Review.
 
-## Anki's Python and Qt: AnkiHub on iOS and Android (2026-11-20)
+## Anki's Python and Qt: AnkiHub on iOS, Android and the web (2026-11-20)
 
 TestFlight feedback (iPhone18,2, iOS 27.2.1, 26.09.4 build): "Add-on Startup
 Failed: AnkiHub", `UnserializableField: Field "tags" of type
@@ -1446,3 +1448,98 @@ with Python 3.14 and AnkiHub's bundled mashumaro 3.15; Python 3.13 (Anki
 | Objects freed on the main thread (the 3.14 stack-bounds trashcan leak): 300 of 300, Simulator and iPhone | ✅ |
 | Android emulator (Kioku_API33, SwiftShader): in-app suite + crash sweep, `version` = Anki 26.09.4, Qt 6.11.2, PyQt 6.11.0, Python 3.13.18 (built from source) | ✅ 53 passed, `numpad-done` and `microphone` skipped |
 | AnkiHub 2026-11-18.1 installed from AnkiWeb in the app (Android emulator): loads after a restart (120 modules), `NoteInfo` round trip, no startup failure | ✅ |
+| Web (headless Chrome): `selftest.py chrome` 35/35 on Python 3.13.18, Qt 6.11.2; AnkiHub from AnkiWeb loads (137 modules), `NoteInfo` round trip ([web/docs/testing.md](../web/docs/testing.md)) | ✅ |
+
+## TestFlight crashes in 0.2.9 (2026-11-23)
+
+14 crash reports for 0.2.9 (234) in Xcode's Organizer (Nov 22–23). That
+build's dSYM was gone, so build 234's commit was rebuilt in a worktree with
+its own dependencies (Qt 6.11.0, Python 3.14): same code layout (`__TEXT`
+size equal to the reports'; every return address follows a call into the
+next frame's function). Five causes: three fixed below
+([fixes.md](fixes.md#runtime-platform)); the Rust core running out of
+memory on an iPad 7 (a full upload and an .apkg import of a large
+collection, five reports) and one crash inside a `ctypes` call (no Python
+stack) are not.
+
+iPhone 15 Pro Max, iOS 27, dev build (`tools/run_device.sh`), each crash
+path driven through `tools/devcmd.sh` with rubicon:
+
+| Test | Result |
+| --- | --- |
+| `QComboBox` never shown, `showPopup()` (the add-on's call) | ✅ returns, no crash; its window has no native window |
+| Combo box in a shown dialog, `showPopup()` | ✅ its picker opens (input panel visible, 264 pt) |
+| Qt window shown, its `QUIMetalView` retained, `QWidget.destroy()`, then `handleScroll:` with the view's pan recognizer | ✅ returns, no crash; old binary calls `platformWindow->window()` without a check |
+| Line edit focused in a dialog, `QIOSTapRecognizer` sent `touchesEnded:` with a fake touch (cursor unchanged, so Qt queues the edit menu), dialog's native window destroyed in the same call | ✅ no crash |
+| Same, window kept (control: the queued code runs) | ✅ the line edit's context menu opens |
+| Crash reports on the phone afterwards | none |
+| Host tests (`shared/tests/run.sh`) | ✅ 248 passed |
+
+Not run: a real trackpad scroll while a dialog closes (iPad), the add-on
+from the reports (unknown), Android (same combo box guard; Qt for Android
+has no `qios` plugin).
+
+## Add-on windows: title bar, edge to edge, menu row (issues #32, #33) (2026-11-26)
+
+Statly opens a full-screen touch window of its own and asked to drop
+Kioku's title bar and the safe-area strips (top, bottom, and the sides in
+landscape). `kioku/windows.py` now takes the window properties
+`kioku_hide_titlebar` and `kioku_edge_to_edge`; `aqt.mw`'s
+`kioku_hide_menu_row` hides Anki's menu row. Windows are also filled from
+their Show event, before Qt draws them (issue #33).
+
+| Test | Result |
+| --- | --- |
+| Host: `test_addon_windows.py` (margins with/without title bar, portrait/landscape safe area, options set after show and before, small dialog that opts in, CSS script per web view incl. re-run on `loadFinished` and zeros after turning off, filled before the first event loop turn, message boxes wait, menu row property incl. full screen) | ✅ 18 passed; whole host suite 275 |
+| iPhone 17 Pro Max sim (iOS 26.4), in-app `addon-window` (window full size right after `show()`, no title bar, margins 0, `safe_area()` = window's safe area, page's `--kioku-safe-*` = 62/0/34/0 px, title bar back → top margin safe + 44 and page 0 px, menu row hidden and back) | ✅ |
+| Same sim, demo page padded by the properties: portrait and landscape (rotated with `requestGeometryUpdate`) | ✅ blue reaches every edge, padding follows the rotation; without the options ‹ Back keeps clear of the notch |
+| iPhone sim full suite + crash sweep | ✅ 60 passed, 6 skipped |
+| iPad Pro 13 (M5) sim, iPadOS 27.0: `addon-window` (safe area 32/0/20/0) | ✅ |
+| iPad sim: `kioku_hide_menu_row` → row height 0; system menu bar still Kioku, File, Edit, View, Tools, Window, Help | ✅ |
+| iPad sim full suite + crash sweep | ✅ 59 passed, 7 skipped |
+
+First iPad run failed: the page was still loading when the window was
+shown, so neither the user script (applies from the next load) nor the
+immediate `runJavaScript` reached it. Now the script is re-run on
+`loadFinished`, and set before the window is shown when the add-on sets
+the property first.
+
+Not run: Android (no phone connected; emulator run with the safe-mode
+build), a real iPhone or iPad.
+
+## Safe mode on iOS, Android and the web (issue #32) (2026-11-26)
+
+`kioku/safemode.py`; native: `ios/src/main.mm` (scene delegate),
+`ios/src/Info.plist.in` (quick action), `android/package/res/xml/shortcuts.xml`
++ `KiokuActivity.requestSafeMode`; web: `?safe=1`
+(`kioku_platform.safe_mode_requested`, `__kiokuWeb.safeModeRequested`) and a
+link on the loading page.
+
+| Test | Result |
+| --- | --- |
+| Host `test_safemode.py` (normal start, quick action request taken once, `KIOKU_SAFE_MODE`, platform request, unfinished start asks only with add-ons, Start Normally, no marker on the web, previous log kept, banner and its command, hooks in place before the profile opens, plist quick action, Android shortcut) | ✅ 13 passed |
+| iPhone 17 Pro Max sim, new build: in-app `safe-mode-request` (`windowScene:performActionForShortcutItem:completionHandler:` on Qt's scene delegate writes the request; offer to close; Cancel drops it) | ✅ |
+| Same sim: request file + relaunch → `mw.safeMode`, AnkiHub not loaded, deck list banner "Safe mode: add-ons are off. What now?" | ✅ |
+| What now? → Add-ons… → Tools › Add-ons lists AnkiHub and Review Heatmap (Toggle Enabled) | ✅ |
+| Start marker left + relaunch → "Kioku closed while starting last time" with Start Without Add-ons / Start Normally; previous log kept as `kioku-previous.log`; Start Without Add-ons → safe mode | ✅ |
+| Two normal relaunches afterwards: no question, marker cleared 5 s after the profile opened | ✅ |
+| iPhone sim full suite + crash sweep | ✅ 61 passed, 6 skipped |
+| Android 13 emulator (Kioku_API33), dev build: `dumpsys shortcut` lists `safe_mode` (Safe mode / Start in Safe Mode) | ✅ |
+| Cold start with the shortcut's intent (`am start -a io.ankidesk.kioku.SAFE_MODE`) → safe mode, banner | ✅ |
+| Shortcut while Kioku runs (`onNewIntent`) → offer; Close Kioku → process ends, no start marker left; opening Kioku from the launcher → safe mode, request used up | ✅ |
+| `safe-mode-request`, `addon-window` on the emulator | ✅ |
+| Android emulator full suite + crash sweep (rebuilt with the bottom inset fix: `addon-window` safe area 0/0/0/0 instead of 0/0/1/0, the window's pixel below the screen no longer counted) | ✅ 62 passed, 5 skipped |
+
+Found and fixed while testing: Anki 26.09.4 decides safe mode in `AnkiApp`
+from `"--safemode" in argv` (the main window copies `app.safeMode`), so a
+request adds the argument and the crash question sets `app.safeMode`; the
+banner and marker hooks were added from `main_window_did_init`, after the
+main window had opened the profile and drawn the deck list (every start
+would have asked) → added before `AnkiQt.__init__`; Anki's handler for
+Tools › Add-ons isn't `onAddons` in 26.09.4 → the menu action is
+triggered; the offer to close waited for an add-on's invisible modal box
+(AnkiHub) → shown over any window.
+
+Not run: the real long-press menu on an iPhone/iPad Home Screen (the
+Simulator has no UI here) and on a phone's launcher; the web version
+(`?safe=1`, loading page link).
